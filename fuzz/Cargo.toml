@@ -1,0 +1,10 @@
+[package]
+name = "fuzz"
+version.workspace = true
+edition.workspace = true
+publish = false
+description = "In-process fuzzing of kairos-core logic (proptest, deterministic in CI)"
+
+[dependencies]
+kairos-core = { path = "../kairos-core" }
+proptest = "1"

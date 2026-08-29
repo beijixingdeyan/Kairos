@@ -1,0 +1,16 @@
+[package]
+name = "os"
+version.workspace = true
+edition.workspace = true
+publish = false
+description = "Kairos boot disk image + QEMU runner"
+build = "build.rs"
+
+[dependencies]
+bootloader = { version = "0.11.17", default-features = false, features = ["bios"] }
+
+[build-dependencies]
+bootloader = { version = "0.11.17", default-features = false, features = ["bios"] }
+# The kernel ELF, built for the bare-metal target as an artifact dependency,
+# embedded into the BIOS disk image by build.rs.
+kernel = { path = "../kernel", artifact = "bin", target = "x86_64-unknown-none" }

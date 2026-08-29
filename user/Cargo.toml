@@ -1,0 +1,16 @@
+﻿[package]
+name = "user"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Kairos user-space programs (ring 3) and their syscall ABI"
+
+[lib]
+name = "kairos"
+path = "src/lib.rs"
+
+[dependencies]
+kairos-core = { path = "../kairos-core" }
+
+
+

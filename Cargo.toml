@@ -1,0 +1,26 @@
+﻿[workspace]
+resolver = "3"
+members = [
+    "os",
+    "kernel",
+    "kairos-core",
+    "user",
+    "fuzz",
+]
+default-members = ["os", "kairos-core"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/kairos-os/kairos"
+
+[workspace.dependencies]
+bootloader_api = "0.11.17"
+x86_64 = "0.15"
+spin = "0.9.8"
+uart_16550 = "0.3.2"
+linked_list_allocator = "0.10.5"
+bitflags = "2.13.1"
+volatile = "0.4.6"
+

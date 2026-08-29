@@ -1,0 +1,9 @@
+[package]
+name = "kairos-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kairos microkernel: no_std logic core (capabilities, scheduling, IPC, memory). Host-testable and cross-compilable."
+build = "build.rs"
+
+[dependencies]

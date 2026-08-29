@@ -1,0 +1,328 @@
+//! Physical frame allocation.
+//!
+//! A small first-fit **bitmap allocator**: one bit per 4 KiB physical frame,
+//! `1 = used`, `0 = free`. The kernel owns a statically sized bitmap that it
+//! carves out of the first usable memory region; everything else in here is
+//! pure logic and therefore host-testable and fuzzable.
+//!
+//! Invariants enforced and tested:
+//! * `free` counter always equals the number of unset bits.
+//! * Frames are never double-allocated (a `free` of a free frame is an
+//!   error, not UB).
+//! * `alloc_range(n)` returns `n` physically contiguous frames.
+//! * Allocations never exceed the managed window (`base .. base+total`).
+
+use core::fmt;
+
+/// Index of a physical 4 KiB frame. May be huge — we run tests against small
+/// windows.
+pub type FrameIdx = u64;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AllocError {
+    /// No contiguous run of `n` frames available.
+    OutOfFrames(usize),
+    /// Index outside the managed window.
+    OutOfRange,
+    /// Frame not currently allocated (double free).
+    NotAllocated,
+}
+
+impl fmt::Display for AllocError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AllocError::OutOfFrames(n) => write!(f, "no run of {n} free frame(s)"),
+            AllocError::OutOfRange => write!(f, "frame index out of range"),
+            AllocError::NotAllocated => write!(f, "frame is not allocated"),
+        }
+    }
+}
+
+/// Bitmap frame allocator over a caller-provided bitmap.
+pub struct BitmapAllocator<'a> {
+    bits: &'a mut [u8],
+    base: FrameIdx,
+    total: usize,
+    free: usize,
+}
+
+impl<'a> BitmapAllocator<'a> {
+    /// `bits` must cover at least `total` bits; all bits must start 0 (free).
+    /// The kernel reserves the boot image & tables by calling [`reserve`]
+    /// afterwards.
+    pub fn new(bits: &'a mut [u8], base: FrameIdx, total: usize) -> Self {
+        assert!(
+            bits.len().saturating_mul(8) >= total,
+            "bitmap too small: {} bytes for {total} frames",
+            bits.len()
+        );
+        let free = total;
+        Self {
+            bits,
+            base,
+            total,
+            free,
+        }
+    }
+
+    pub const fn base(&self) -> FrameIdx {
+        self.base
+    }
+
+    pub const fn total(&self) -> usize {
+        self.total
+    }
+
+    pub const fn free_count(&self) -> usize {
+        self.free
+    }
+
+    pub fn used_count(&self) -> usize {
+        self.total - self.free
+    }
+
+    fn bit(&self, idx: usize) -> bool {
+        self.bits[idx / 8] & (1 << (idx % 8)) != 0
+    }
+
+    fn set_bit(&mut self, idx: usize, used: bool) {
+        let mask = 1 << (idx % 8);
+        if used {
+            self.bits[idx / 8] |= mask;
+        } else {
+            self.bits[idx / 8] &= !mask;
+        }
+    }
+
+    /// Allocate a single frame (first fit). `None` if exhausted.
+    pub fn alloc(&mut self) -> Option<FrameIdx> {
+        self.alloc_range(1)
+    }
+
+    /// Allocate `n` contiguous frames. First fit by scanning word-wise.
+    pub fn alloc_range(&mut self, n: usize) -> Option<FrameIdx> {
+        if n == 0 || n > self.free {
+            return None;
+        }
+        let total = self.total;
+        let mut run = 0usize;
+        let mut run_start = 0usize;
+        for i in 0..total {
+            if self.bit(i) {
+                run = 0;
+                continue;
+            }
+            if run == 0 {
+                run_start = i;
+            }
+            run += 1;
+            if run == n {
+                for j in run_start..run_start + n {
+                    self.set_bit(j, true);
+                }
+                self.free -= n;
+                return Some(self.base + run_start as u64);
+            }
+        }
+        None
+    }
+
+    /// Release a previously allocated single frame.
+    pub fn free(&mut self, idx: FrameIdx) -> Result<(), AllocError> {
+        self.free_range(idx, 1)
+    }
+
+    /// Release a contiguous run of `n` frames starting at `idx`.
+    pub fn free_range(&mut self, idx: FrameIdx, n: usize) -> Result<(), AllocError> {
+        if idx < self.base || idx + n as u64 > self.base + self.total as u64 {
+            return Err(AllocError::OutOfRange);
+        }
+        let start = (idx - self.base) as usize;
+        for j in start..start + n {
+            if !self.bit(j) {
+                return Err(AllocError::NotAllocated);
+            }
+        }
+        for j in start..start + n {
+            self.set_bit(j, false);
+        }
+        self.free += n;
+        Ok(())
+    }
+
+    /// Mark `n` frames starting at `idx` as used (boot reservation).
+    pub fn reserve(&mut self, idx: FrameIdx, n: usize) -> Result<(), AllocError> {
+        if idx < self.base || idx + n as u64 > self.base + self.total as u64 {
+            return Err(AllocError::OutOfRange);
+        }
+        let start = (idx - self.base) as usize;
+        for j in start..start + n {
+            if self.bit(j) {
+                return Err(AllocError::NotAllocated);
+            }
+        }
+        for j in start..start + n {
+            self.set_bit(j, true);
+        }
+        self.free -= n;
+        Ok(())
+    }
+
+    /// Clear `n` bits starting at `idx` regardless of their current value,
+    /// adjusting the free counter. Used when building the initial map from
+    /// the firmware (a range may already be clear if two regions overlap).
+    pub fn clear_range(&mut self, idx: FrameIdx, n: usize) {
+        if idx < self.base || idx + n as u64 > self.base + self.total as u64 {
+            return;
+        }
+        let start = (idx - self.base) as usize;
+        for j in start..start + n {
+            if self.bit(j) {
+                self.free += 1;
+            }
+            self.set_bit(j, false);
+        }
+    }
+
+    /// Slow invariant check used by tests and fuzzing: recount unset bits and
+    /// compare with `free_count`.
+    pub fn check_invariants(&self) -> bool {
+        let mut unset = 0usize;
+        for i in 0..self.total {
+            if !self.bit(i) {
+                unset += 1;
+            }
+        }
+        unset == self.free
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make<'b>(bits: &'b mut [u8], base: FrameIdx, total: usize) -> BitmapAllocator<'b> {
+        for b in bits.iter_mut() {
+            *b = 0;
+        }
+        BitmapAllocator::new(bits, base, total)
+    }
+
+    #[test]
+    fn alloc_full_window_then_exhaust() {
+        let mut bits = [0u8; 32]; // 256 frames
+        let mut a = make(&mut bits, 0x1000, 256);
+        for i in 0..256 {
+            assert_eq!(a.alloc(), Some(0x1000 + i as u64));
+        }
+        assert_eq!(a.alloc(), None);
+        assert_eq!(a.free_count(), 0);
+        assert!(a.check_invariants());
+    }
+
+    #[test]
+    fn free_then_realloc() {
+        let mut bits = [0u8; 8];
+        let mut a = make(&mut bits, 0, 64);
+        let f0 = a.alloc().unwrap();
+        let f1 = a.alloc().unwrap();
+        a.free(f0).unwrap();
+        // First fit returns the lowest freed frame again.
+        assert_eq!(a.alloc(), Some(f0));
+        let _ = f1;
+    }
+
+    #[test]
+    fn double_free_detected() {
+        let mut bits = [0u8; 8];
+        let mut a = make(&mut bits, 0, 64);
+        let f = a.alloc().unwrap();
+        a.free(f).unwrap();
+        assert_eq!(a.free(f), Err(AllocError::NotAllocated));
+    }
+
+    #[test]
+    fn out_of_range_operations_fail() {
+        let mut bits = [0u8; 8];
+        let mut a = make(&mut bits, 0x100, 64);
+        assert_eq!(a.free(0x0), Err(AllocError::OutOfRange));
+        assert_eq!(a.alloc_range(1), Some(0x100));
+        assert_eq!(a.reserve(0x200, 400), Err(AllocError::OutOfRange));
+    }
+
+    #[test]
+    fn contiguous_range_allocation() {
+        let mut bits = [0u8; 8];
+        let mut a = make(&mut bits, 0, 64);
+        let start = a.alloc_range(8).unwrap();
+        assert_eq!(start, 0);
+        // The 8 frames are contiguous and the 9th is a different line.
+        for i in 0..8 {
+            assert_eq!(a.alloc(), Some(8 + i as u64));
+        }
+        assert_eq!(a.alloc(), Some(16));
+        // Free the range back.
+        a.free_range(start, 8).unwrap();
+        assert!(a.check_invariants());
+    }
+
+    #[test]
+    fn range_allocation_skips_used() {
+        let mut bits = [0u8; 8];
+        let mut a = make(&mut bits, 0, 64);
+        a.alloc().unwrap(); // frame 0 used
+        a.alloc().unwrap(); // frame 1 used
+        let r = a.alloc_range(3).unwrap();
+        assert_eq!(r, 2); // skips 0,1
+    }
+
+    #[test]
+    fn big_range_fails_cleanly() {
+        let mut bits = [0u8; 8];
+        let mut a = make(&mut bits, 0, 64);
+        assert_eq!(a.alloc_range(65), None);
+        assert_eq!(a.alloc_range(64), Some(0));
+        assert_eq!(a.alloc_range(1), None);
+    }
+
+    #[test]
+    fn reserve_marks_and_counts() {
+        let mut bits = [0u8; 8];
+        let mut a = make(&mut bits, 0, 64);
+        a.reserve(10, 4).unwrap();
+        assert_eq!(a.free_count(), 60);
+        // The reserved window is not re-allocated.
+        assert_eq!(a.alloc_range(4), Some(0));
+        assert_eq!(a.alloc_range(4), Some(4));
+        assert_eq!(a.alloc_range(4), Some(14));
+    }
+
+    #[test]
+    fn invariants_hold_after_randomish_mix() {
+        let mut bits = [0u8; 64];
+        let mut a = make(&mut bits, 0x400_000, 512);
+        let mut allocs = [0u64; 16];
+        for i in 0..16 {
+            allocs[i] = a.alloc().unwrap();
+        }
+        for i in (0..16).step_by(2) {
+            a.free(allocs[i]).unwrap();
+        }
+        for _ in 0..4 {
+            assert!(a.alloc().is_some());
+        }
+        // `reserve` takes *absolute* frame indices (like free_range).
+        a.reserve(a.base() + 64, 8).unwrap();
+        assert!(a.check_invariants());
+    }
+
+    #[test]
+    fn base_offset_returns_absolute_indices() {
+        let mut bits = [0u8; 8];
+        let mut a = make(&mut bits, 0x1234_0000, 64);
+        // Indices are absolute (base + relative offset) in *frame* units;
+        // the caller multiplies by 4096 to obtain a physical address.
+        assert_eq!(a.alloc(), Some(0x1234_0000));
+        assert_eq!(a.alloc(), Some(0x1234_0001));
+    }
+}

@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+env:
+  RUST_NIGHTLY: nightly-2026-08-27
+  CARGO_TERM_COLOR: never
+
+jobs:
+  host-tests:
+    name: Host unit & property tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (pinned nightly)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_NIGHTLY }}
+          targets: x86_64-unknown-none
+          components: rust-src, llvm-tools, rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: kairos-core unit tests
+        run: cargo test -p kairos-core
+
+      - name: fuzz property tests (deterministic)
+        run: cargo test -p fuzz --release -- --test-threads=1
+
+      - name: clippy (host crates)
+        run: cargo clippy -p kairos-core -p fuzz -- -D warnings
+
+  qemu-integration:
+    name: QEMU integration (boot + self-tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (pinned nightly)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_NIGHTLY }}
+          targets: x86_64-unknown-none
+          components: rust-src, llvm-tools
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install QEMU
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86
+
+      - name: Build boot image
+        run: cargo build -p os
+
+      - name: Boot under QEMU with in-guest self-tests
+        run: KAIROS_TEST=1 KAIROS_QEMU=qemu-system-x86_64 cargo run -p os
+
+      - name: Boot without self-tests (shell milestone, 15 s watchdog)
+        run: |
+          timeout 15 bash -c 'KAIROS_QEMU=qemu-system-x86_64 cargo run -p os - < /dev/null \
+            | tee /tmp/kairos-boot.log' || true
+          grep -q "kairos> " /tmp/kairos-boot.log || \
+            { echo "shell prompt not seen"; exit 1; }

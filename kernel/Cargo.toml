@@ -1,0 +1,17 @@
+[package]
+name = "kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kairos microkernel: x86_64 freestanding kernel, booted by the `bootloader` crate in QEMU."
+build = "build.rs"
+
+[dependencies]
+bootloader_api.workspace = true
+kairos-core = { path = "../kairos-core" }
+x86_64.workspace = true
+spin.workspace = true
+uart_16550.workspace = true
+linked_list_allocator.workspace = true
+bitflags.workspace = true
+volatile.workspace = true

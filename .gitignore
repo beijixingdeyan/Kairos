@@ -1,0 +1,30 @@
+# --- must not be published: the original assignment prompt (contains no code) ---
+os_project_prompt.txt
+
+# --- build artifacts ---
+/target/
+**/target/
+
+# --- local tooling (per-task constraint: downloads live inside the repo dir) ---
+/tools/
+
+# --- fuzz & coverage artifacts ---
+/fuzz/corpus/
+/fuzz/artifacts/
+/coverage/
+*.profraw
+*.profdata
+llvm-cov-target/
+
+# --- editor / OS cruft ---
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# --- local overrides ---
+.env
+.env.local

@@ -1,0 +1,13 @@
+﻿# Unstable cargo features required by the bootchain (artifact dependencies).
+[unstable]
+bindeps = true
+
+# Increase the default parallelism when building the freestanding workspace.
+
+[profile.dev]
+opt-level = 1
+debug = true
+
+[profile.release]
+opt-level = 3
+debug = false
