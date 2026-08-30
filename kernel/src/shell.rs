@@ -67,6 +67,11 @@ extern "C" fn shell_main(_arg: usize) -> ! {
 }
 
 fn run_cmd(cmd: &str) {
+    // This ring-0 handler runs with interrupts enabled and performs multi-
+    // step kernel operations (ELF loading, task registration, console
+    // output). Mark the region non-preemptible so a timer dispatch can
+    // never abandon it mid-step (see the KERNEL_BUSY note in task::mod).
+    let _busy = task::kernel_busy_enter();
     let mut parts = cmd.split_whitespace();
     let name = parts.next().unwrap_or("");
     match name {

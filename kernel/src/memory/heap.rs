@@ -10,7 +10,7 @@ use kairos_core::config::HEAP_SIZE;
 
 /// The global allocator (Rust `alloc` via `#[global_allocator]`).
 #[global_allocator]
-static ALLOCATOR: LockedHeap = LockedHeap::empty();
+pub static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
 #[derive(Debug)]
 pub enum HeapInitError {

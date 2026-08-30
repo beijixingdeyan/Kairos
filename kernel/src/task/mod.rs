@@ -74,6 +74,35 @@ static GRAVEYARD: Mutex<Vec<TaskEntry>> = Mutex::new(Vec::new());
 
 static NEXT_TASK_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
 
+/// Non-preemptible kernel region marker. Ring-0 code that runs with
+/// interrupts enabled (the shell's command handlers) marks itself busy;
+/// the timer ISR then acks + returns without dispatching, so no context
+/// switch can land in the middle of a multi-step kernel operation. At high
+/// tick rates (real 1 kHz on KVM/Linux, `-icount` under TCG) such a switch
+/// was reliably wedging the interrupted kernel task.
+static KERNEL_BUSY: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// RAII guard: mark a kernel region non-preemptible (nestable).
+pub struct KernelBusyGuard;
+
+/// Enter a non-preemptible kernel region; drop the guard to leave it.
+pub fn kernel_busy_enter() -> KernelBusyGuard {
+    KERNEL_BUSY.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    KernelBusyGuard
+}
+
+impl Drop for KernelBusyGuard {
+    fn drop(&mut self) {
+        KERNEL_BUSY.fetch_sub(1, core::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// True while a non-preemptible kernel region is active (ISR consults it).
+pub fn kernel_is_busy() -> bool {
+    KERNEL_BUSY.load(core::sync::atomic::Ordering::SeqCst) != 0
+}
+
 /// Run `f` with interrupts disabled and the scheduler locked. Every scheduler
 /// transition from *task context* (interrupts enabled) goes through here so
 /// the timer ISR can never race with it (the ISR itself runs with interrupts
@@ -147,12 +176,19 @@ fn new_task(
     entry.save_area = switch::build_initial_frame(&entry);
     frame_builder(&mut entry);
 
-    with_sched(|s| {
-        s.register(id, priority, weight, deadline)
-            .expect("task register failed");
+    // Register with the scheduler and publish the task entry under ONE
+    // interrupts-disabled region. A timer IRQ landing between the two steps
+    // (or in with_sched's enable()→return window) dispatches away and, at
+    // high tick rates - real 1 kHz on KVM/Linux CI, `-icount` locally -
+    // wedges the spawned task's creator. Both steps are pure data
+    // transitions, so holding IF=0 across them is always safe.
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        with_sched_locked(|s| {
+            s.register(id, priority, weight, deadline)
+                .expect("task register failed");
+        });
+        TASKS.lock().push(entry);
     });
-
-    TASKS.lock().push(entry);
     id
 }
 
@@ -164,6 +200,9 @@ pub fn spawn_kernel(
     entry: extern "C" fn(usize) -> !,
     arg: usize,
 ) -> TaskId {
+    // Non-preemptible: the whole load/register sequence plus the caller's
+    // continuation must not be abandoned by a timer dispatch.
+    let _busy = kernel_busy_enter();
     new_task(name, priority, weight, None, false, |e| {
         // # Safety: writing fields of a frame owned by this task.
         unsafe {
@@ -212,6 +251,12 @@ fn spawn_user_full(
     deadline: Option<Deadline>,
     arg: usize,
 ) -> Result<TaskId, ()> {
+    // Non-preemptible region: the ELF loader (map/copy/relocate/tighten,
+    // page-table churn at IF=1) and task registration must run atomically
+    // - a timer dispatch inside either abandons a half-installed program.
+    // The guard is nestable, so the shell's handler-level guard (run_cmd)
+    // and this one compose.
+    let _busy = kernel_busy_enter();
     // Load the ELF (maps user pages into the shared address space). Returns
     // the canonical static name so the task never borrows caller memory.
     let (canonical, entry, stack_top) = user::load_user_program(name)?;
@@ -290,6 +335,14 @@ pub fn on_irq_after_eoi(frame: *mut CpuFrame) -> *mut CpuFrame {
     if PAUSE_TIMER.load(core::sync::atomic::Ordering::SeqCst) {
         return frame;
     }
+    // Non-preemptible kernel region (shell command handler, ...): ack the
+    // tick and return to the interrupted kernel code - dispatching away now
+    // would abandon a multi-step kernel operation (spawn/format/console)
+    // that must run to completion. The next tick (1 ms later, or the next
+    // voluntary yield window) performs the wake-scan and rotation.
+    if kernel_is_busy() {
+        return frame;
+    }
 
     let interrupted = running_id();
 
@@ -311,7 +364,8 @@ pub fn on_irq_after_eoi(frame: *mut CpuFrame) -> *mut CpuFrame {
 
     // A kernel task requested a voluntary yield (<= 1 ms latency): rotate
     // it to the back of the queue so the next tick preempts.
-    let action = if KERNEL_YIELD.swap(false, core::sync::atomic::Ordering::SeqCst) {
+    let yielded = KERNEL_YIELD.swap(false, core::sync::atomic::Ordering::SeqCst);
+    let action = if yielded {
         if let Some(cur) = interrupted {
             with_sched_locked(|s| {
                 s.block(cur);
@@ -334,15 +388,24 @@ pub fn on_irq_after_eoi(frame: *mut CpuFrame) -> *mut CpuFrame {
                 set_restore_flag(interrupted);
                 return frame;
             }
-            // Save where the interrupted task's registers live.
-            if let Some(interrupted) = interrupted {
-                if let Some(e) = entry_mut(interrupted) {
-                    e.save_area = frame;
-                }
-            }
-            switch_to(next, interrupted)
+            dispatch_switch(interrupted, next, frame)
         }
     }
+}
+
+#[inline]
+fn dispatch_switch(
+    interrupted: Option<TaskId>,
+    next: Option<TaskId>,
+    frame: *mut CpuFrame,
+) -> *mut CpuFrame {
+    // Save where the interrupted task's registers live.
+    if let Some(interrupted) = interrupted {
+        if let Some(e) = entry_mut(interrupted) {
+            e.save_area = frame;
+        }
+    }
+    switch_to(next, interrupted)
 }
 
 /// Called from the syscall path: park the current task (via `block`), then

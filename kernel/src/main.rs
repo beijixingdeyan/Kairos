@@ -161,6 +161,10 @@ fn policy_name() -> &'static str {
 
 /// The in-kernel test suite, run in test mode.
 fn test_runner() -> bool {
+    // The whole suite is a ring-0 critical operation: multi-step kernel
+    // work (spawns, loaders, IPC, sleeps) that a timer dispatch must never
+    // abandon. The real-rate hosts (Linux CI at 1 kHz) wedge without this.
+    let _busy = crate::task::kernel_busy_enter();
     let mut ok = true;
     let mut report = |name: &str, r: bool| {
         serial::write_line(&format!("[tests] {name}: {}", if r { "PASS" } else { "FAIL" }));
