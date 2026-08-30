@@ -1,13 +1,13 @@
-﻿//! Interrupt & exception handling: IDT, PIC remapping, PIT timer.
+//! Interrupt & exception handling: IDT, PIC remapping, PIT timer.
 //!
 //! Every vector runs through a small assembly stub that:
 //! 1. pushes the general-purpose registers (see [`CpuFrame`]),
 //! 2. calls a Rust handler, and
-//! 3. restores the registers 鈥?possibly **from a different task's frame**,
+//! 3. restores the registers —possibly **from a different task's frame**,
 //!    which is exactly how preemptive context switching happens.
 //!
-//! Layout on the stack at the Rust handler (low 鈫?high):
-//! `[r15 鈥?rbp][err][vec][rip][cs][rflags][rsp][ss]` where the
+//! Layout on the stack at the Rust handler (low →high):
+//! `[r15 —rbp][err][vec][rip][cs][rflags][rsp][ss]` where the
 //! `[rip .. ss]` tail is pushed by the CPU (only `[rip][cs][rflags]` on a
 //! ring-0 interrupt).
 
@@ -44,7 +44,7 @@ pub struct CpuFrame {
     pub rip: u64,
     pub cs: u64,
     pub rflags: u64,
-    /// Present only for ring-3 鈫?ring-0 transitions.
+    /// Present only for ring-3 →ring-0 transitions.
     pub user_rsp: u64,
     pub user_ss: u64,
 }
@@ -87,38 +87,52 @@ static IDT: spin::Lazy<InterruptDescriptorTable> = spin::Lazy::new(|| {
     // # Safety: every address below is a valid, executable stub that runs to
     // `ud2` (exceptions) or `iretq` (IRQs) and never returns normally.
     unsafe {
-        idt[0].set_handler_addr(VirtAddr::new(exception_0 as *const () as u64));
-        idt[1].set_handler_addr(VirtAddr::new(exception_1 as *const () as u64));
-        idt[2].set_handler_addr(VirtAddr::new(exception_2 as *const () as u64));
-        idt[3].set_handler_addr(VirtAddr::new(exception_3 as *const () as u64));
-        idt[4].set_handler_addr(VirtAddr::new(exception_4 as *const () as u64));
-        idt[5].set_handler_addr(VirtAddr::new(exception_5 as *const () as u64));
-        idt[6].set_handler_addr(VirtAddr::new(exception_6 as *const () as u64));
-        idt[7].set_handler_addr(VirtAddr::new(exception_7 as *const () as u64));
-        idt[8].set_handler_addr(VirtAddr::new(exception_8 as *const () as u64));
-        idt[9].set_handler_addr(VirtAddr::new(exception_9 as *const () as u64));
-        idt[10].set_handler_addr(VirtAddr::new(exception_10 as *const () as u64));
-        idt[11].set_handler_addr(VirtAddr::new(exception_11 as *const () as u64));
-        idt[12].set_handler_addr(VirtAddr::new(exception_12 as *const () as u64));
-        idt[13].set_handler_addr(VirtAddr::new(exception_13 as *const () as u64));
-        idt[14].set_handler_addr(VirtAddr::new(exception_14 as *const () as u64));
-        idt[15].set_handler_addr(VirtAddr::new(exception_15 as *const () as u64));
-        idt[16].set_handler_addr(VirtAddr::new(exception_16 as *const () as u64));
-        idt[17].set_handler_addr(VirtAddr::new(exception_17 as *const () as u64));
-        idt[18].set_handler_addr(VirtAddr::new(exception_18 as *const () as u64));
-        idt[19].set_handler_addr(VirtAddr::new(exception_19 as *const () as u64));
-        idt[20].set_handler_addr(VirtAddr::new(exception_20 as *const () as u64));
-        idt[21].set_handler_addr(VirtAddr::new(exception_21 as *const () as u64));
-        idt[22].set_handler_addr(VirtAddr::new(exception_22 as *const () as u64));
-        idt[23].set_handler_addr(VirtAddr::new(exception_23 as *const () as u64));
-        idt[24].set_handler_addr(VirtAddr::new(exception_24 as *const () as u64));
-        idt[25].set_handler_addr(VirtAddr::new(exception_25 as *const () as u64));
-        idt[26].set_handler_addr(VirtAddr::new(exception_26 as *const () as u64));
-        idt[27].set_handler_addr(VirtAddr::new(exception_27 as *const () as u64));
-        idt[28].set_handler_addr(VirtAddr::new(exception_28 as *const () as u64));
-        idt[29].set_handler_addr(VirtAddr::new(exception_29 as *const () as u64));
-        idt[30].set_handler_addr(VirtAddr::new(exception_30 as *const () as u64));
-        idt[31].set_handler_addr(VirtAddr::new(exception_31 as *const () as u64));
+        // Vectors without error code (indexable). 15/22..=27/31 are reserved
+        // (the x86_64 crate panics on indexing them), 18 is index-panicking
+        // too and set below via the `machine_check` field.
+        for i in [0u8, 1, 2, 3, 4, 5, 6, 7, 9, 16, 19, 20, 28] {
+            let addr = VirtAddr::new(match i {
+                0 => exception_0 as *const () as u64,
+                1 => exception_1 as *const () as u64,
+                2 => exception_2 as *const () as u64,
+                3 => exception_3 as *const () as u64,
+                4 => exception_4 as *const () as u64,
+                5 => exception_5 as *const () as u64,
+                6 => exception_6 as *const () as u64,
+                7 => exception_7 as *const () as u64,
+                9 => exception_9 as *const () as u64,
+                16 => exception_16 as *const () as u64,
+                19 => exception_19 as *const () as u64,
+                20 => exception_20 as *const () as u64,
+                28 => exception_28 as *const () as u64,
+                _ => unreachable!(),
+            });
+            idt[i].set_handler_addr(addr);
+        }
+        // Error-code and diverging exceptions are NOT indexable in the
+        // x86_64 crate; use the named fields.
+        idt.double_fault
+            .set_handler_addr(VirtAddr::new(exception_8 as *const () as u64));
+        idt.invalid_tss
+            .set_handler_addr(VirtAddr::new(exception_10 as *const () as u64));
+        idt.segment_not_present
+            .set_handler_addr(VirtAddr::new(exception_11 as *const () as u64));
+        idt.stack_segment_fault
+            .set_handler_addr(VirtAddr::new(exception_12 as *const () as u64));
+        idt.general_protection_fault
+            .set_handler_addr(VirtAddr::new(exception_13 as *const () as u64));
+        idt.page_fault
+            .set_handler_addr(VirtAddr::new(exception_14 as *const () as u64));
+        idt.alignment_check
+            .set_handler_addr(VirtAddr::new(exception_17 as *const () as u64));
+        idt.machine_check
+            .set_handler_addr(VirtAddr::new(exception_18 as *const () as u64));
+        idt.cp_protection_exception
+            .set_handler_addr(VirtAddr::new(exception_21 as *const () as u64));
+        idt.vmm_communication_exception
+            .set_handler_addr(VirtAddr::new(exception_29 as *const () as u64));
+        idt.security_exception
+            .set_handler_addr(VirtAddr::new(exception_30 as *const () as u64));
         idt[32].set_handler_addr(VirtAddr::new(irq_timer as *const () as u64));
         for v in 33..=47u8 {
             idt[v].set_handler_addr(VirtAddr::new(irq_other as *const () as u64));
@@ -132,7 +146,7 @@ pub fn init_idt() {
 }
 
 // -------------------------------------------------------------------------
-// Exception names (vector 鈫?human-readable)
+// Exception names (vector →human-readable)
 // -------------------------------------------------------------------------
 
 const EXCEPTION_NAMES: [&str; 32] = [
@@ -171,8 +185,8 @@ const EXCEPTION_NAMES: [&str; 32] = [
 ];
 
 /// Push layout for the stubs below (two words below the 15 GPRs):
-///   no-error vectors: `push 0; push vec` 鈫?[gprs][vec][0][rip][cs][flags]
-///   error-code vectors: `push vec` only 鈫?[gprs][vec][err][rip][cs][flags]
+///   no-error vectors: `push 0; push vec` →[gprs][vec][0][rip][cs][flags]
+///   error-code vectors: `push vec` only →[gprs][vec][err][rip][cs][flags]
 /// So the handler always sees `vec` at offset 15*8 and `err` at 16*8.
 macro_rules! exception_stub {
     ($name:ident, $vec:literal, no_err) => {
@@ -182,8 +196,10 @@ macro_rules! exception_stub {
                 ".balign 16\n",
                 ".global ", stringify!($name), "\n",
                 stringify!($name), ":\n",
-                "push 0\n",     // dummy error code
+                // Layout `[….][err@120][vec@128]`: push vec first (lands at
+                // the higher offset), then the dummy error code below it.
                 "push ", $vec, "\n",
+                "push 0\n", // dummy error code
                 "push rbp\npush rax\npush rbx\npush rcx\npush rdx\n",
                 "push rsi\npush rdi\npush r8\npush r9\npush r10\n",
                 "push r11\npush r12\npush r13\npush r14\npush r15\n",
@@ -296,8 +312,8 @@ extern "C" fn kairos_exception_handler(frame: &CpuFrame) -> ! {
 // -------------------------------------------------------------------------
 
 /// Set by the scheduler shortly before the IRQ stub restores a frame:
-/// `true` 鈫?the restored task runs in ring 3, so the stub must `swapgs`
-/// back (GS base: kernel 鈫?user) right before `iretq`.
+/// `true` →the restored task runs in ring 3, so the stub must `swapgs`
+/// back (GS base: kernel →user) right before `iretq`.
 ///
 /// The value is mirrored into the kernel GS area (scratch1, offset 8) so the
 /// assembly stubs can read it without a RIP-relative symbol reference.
@@ -326,8 +342,8 @@ macro_rules! irq_stub {
                 "jz 1f\n",
                 "swapgs\n",
                 "1:\n",
-                "push 0\n", // err
-                "push ", $vec, "\n",
+                "push ", $vec, "\n", // vec lands at 128 (see CpuFrame)
+                "push 0\n",          // err at 120
                 "push rbp\npush rax\npush rbx\npush rcx\npush rdx\n",
                 "push rsi\npush rdi\npush r8\npush r9\npush r10\n",
                 "push r11\npush r12\npush r13\npush r14\npush r15\n",
@@ -357,6 +373,10 @@ macro_rules! irq_stub {
 
 irq_stub!(irq_timer, 32);
 irq_stub!(irq_other, 33);
+
+/// Jump the CPU into a pre-built task frame without an interrupt (used to
+/// start the very first task). Never returns.
+
 
 /// Jump the CPU into a pre-built task frame without an interrupt (used to
 /// start the very first task). Never returns.

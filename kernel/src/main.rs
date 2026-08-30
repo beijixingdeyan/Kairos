@@ -41,7 +41,16 @@ use kairos_core::config;
 /// Re-export for the logging macros (`$crate::LogLevel`).
 pub use kairos_core::config::LogLevel;
 
-bootloader_api::entry_point!(kernel_main);
+bootloader_api::entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
+
+/// Bootloader configuration: the kernel needs the whole physical memory
+/// mapped (KASLR-free, deterministic) so we can adopt its page tables
+/// through the reported `physical_memory_offset`.
+pub static BOOTLOADER_CONFIG: bootloader_api::BootloaderConfig = {
+    let mut config = bootloader_api::BootloaderConfig::new_default();
+    config.mappings.physical_memory = Some(bootloader_api::config::Mapping::Dynamic);
+    config
+};
 
 /// Kernel entry point. Never returns.
 #[allow(unreachable_code)] // trailing idle loop guards `shell::start() -> !`
@@ -65,13 +74,15 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     interrupts::init_idt();
     interrupts::init_pic_and_timer();
 
-    // 5. Interrupts on: from here on the scheduler may preempt us.
-    x86_64::instructions::interrupts::enable();
-
-    // 6. Tasking + IPC + capability space for the kernel's own tasks.
+    // 5. Tasking + IPC + capability space for the kernel's own tasks, and
+    //    the syscall MSRs (GS area) — *before* interrupts come on, so a
+    //    timer IRQ can never observe an unset GS base.
     task::init();
     caps::init();
     syscall::init();
+
+    // 6. Interrupts on: from here on the scheduler may preempt us.
+    x86_64::instructions::interrupts::enable();
 
     // 7. Announce.
     banner();
@@ -85,6 +96,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     }
 
     // 9. Spawn boot-time tasks and hand over to the scheduler.
+    task::set_timer_paused(true);
     task::boot_tasks();
 
     // 10. The kernel's own task: interactive shell (unless disabled).
@@ -120,7 +132,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
 fn banner() {
     info!("------------------------------------------------------------");
-    info!(" Kairos Microkernel v0.1.0 鈥?capability-based, deterministic");
+    info!(" Kairos Microkernel v0.1.0 — capability-based, deterministic");
     info!(" policy        : {}", policy_name());
     info!(" quantum       : {} ms", config::QUANTUM_MS);
     info!(" kernel heap   : {} MiB", config::HEAP_MIB);
@@ -145,12 +157,16 @@ fn policy_name() -> &'static str {
 /// The in-kernel test suite, run in test mode.
 fn test_runner() -> bool {
     let mut ok = true;
-    ok &= logger::test_echo();
-    ok &= memory::run_tests();
-    ok &= ipc::run_tests();
-    ok &= task::run_tests();
-    ok &= syscall::run_tests();
-    ok &= user::run_tests();
-    ok &= shell::run_tests();
+    let mut report = |name: &str, r: bool| {
+        serial::write_line(&format!("[tests] {name}: {}", if r { "PASS" } else { "FAIL" }));
+        ok &= r;
+    };
+    report("logger", logger::test_echo());
+    report("memory", memory::run_tests());
+    report("ipc", ipc::run_tests());
+    report("task", task::run_tests());
+    report("syscall", syscall::run_tests());
+    report("user", user::run_tests());
+    report("shell", shell::run_tests());
     ok
 }

@@ -1,9 +1,9 @@
-﻿//! Global Descriptor Table + Task State Segment.
+//! Global Descriptor Table + Task State Segment.
 //!
-//! Layout (index 鈫?selector):
+//! Layout (index →selector):
 //!   0x08 kernel code | 0x10 kernel data | 0x18 user data | 0x20 user code | TSS
 //!
-//! The TSS holds `rsp0` 鈥?the kernel stack used when an interrupt traps from
+//! The TSS holds `rsp0` —the kernel stack used when an interrupt traps from
 //! user mode. The scheduler rewrites it on every task switch.
 
 use core::cell::UnsafeCell;

@@ -81,8 +81,11 @@ pub use x86_64::structures::paging::PageTableFlags;
 pub fn run_tests() -> bool {
     let mut ok = true;
     ok &= frames::test_frames();
+    crate::serial::write_line("frames:self-test:ok");
     ok &= heap::test_heap();
+    crate::serial::write_line("heap:self-test:ok");
     ok &= paging::test_paging();
+    crate::serial::write_line("paging:self-test:ok");
     ok
 }
 

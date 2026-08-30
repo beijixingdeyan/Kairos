@@ -1,4 +1,4 @@
-﻿//! System calls: the ring-3 閳?ring-0 ABI.
+//! System calls: the ring-3 閳?ring-0 ABI.
 //!
 //! User programs enter the kernel with the `syscall` instruction (MSR
 //! `LSTAR`), which unfortunately does **not** switch stacks. The entry stub
@@ -80,9 +80,14 @@ pub fn init() {
         wrmsr(0xC000_0081, 0x08u64 << 32 | 0x08u64 << 48);
         // SFMASK: clear IF on syscall so kernel code runs interrupt-free.
         wrmsr(0xC000_0084, 0x200);
-        // Kernel GS base (used by swapgs) + user GS base (0).
-        wrmsr(0xC000_0102, &KAIROS_GS_AREA as *const GsArea as u64);
-        wrmsr(0xC000_0101, 0);
+        // GS bases: while in ring 0 the *stubs* read `gs:[8]` (the user-return
+        // flag) and `gs:[0]` (kernel stack), so ring 0 must run with
+        // GS_BASE = the kernel GS area. `swapgs` (performed on ring3→kernel
+        // entries and kernel→ring3 restores) exchanges the two bases, so with
+        // KERNEL_GS_BASE = 0 every swap lands user mode on a null user GS —
+        // the kernel area is never reachable from ring 3.
+        wrmsr(0xC000_0101, &KAIROS_GS_AREA as *const GsArea as u64); // GS_BASE
+        wrmsr(0xC000_0102, 0); // KERNEL_GS_BASE
     }
 }
 

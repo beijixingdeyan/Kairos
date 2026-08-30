@@ -21,7 +21,9 @@ pub fn start() -> ! {
         kairos_core::caps::CapRights::ALL,
     );
     let _ = task::with_cspace(id, |c| c.insert(cap));
-    task::start_shell(id)
+    // Enter through the scheduler's first dispatch (the idle task); the
+    // shell itself is reached by normal rotation once it is the ring head.
+    task::bootstrap_first_task()
 }
 
 extern "C" fn shell_main(_arg: usize) -> ! {

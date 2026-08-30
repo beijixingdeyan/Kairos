@@ -1,9 +1,9 @@
 //! 16550 UART serial console (COM1).
 //!
 //! The serial line is the kernel's most trustworthy output: it works even
-//! before paging, before interrupts, and in panic paths. QEMU maps it to
-//! stdio (`-serial mon:stdio`), which is also how our automated tests read
-//! kernel output.
+//! before paging, before interrupts, and in panic paths. The QEMU runner
+//! wires it to a side channel (TCP on Windows, stdio elsewhere) and pumps
+//! the console to the host terminal / CI logs.
 
 use spin::Mutex;
 use uart_16550::SerialPort;
@@ -32,6 +32,48 @@ pub fn _probe_byte(b: u8) {
     let mut p = Port::<u8>::new(0xe9);
     unsafe {
         p.write(b);
+    }
+}
+
+// --- Debug console (Bochs port 0xE9) --------------------------------------
+// Interrupt-safe tracer: no locks, usable from ISR context while the serial
+// console's spinlock may be held by the preempted code. QEMU forwards it to
+// `-debugcon file:` so it never interleaves with guest serial output. Used
+// only while debugging; all call sites are temporary.
+
+/// Trace a string through the debug console.
+pub fn dbg_s(s: &str) {
+    let mut p = Port::<u8>::new(0xe9);
+    for &b in s.as_bytes() {
+        unsafe {
+            p.write(b);
+        }
+    }
+    unsafe {
+        p.write(b'\n');
+    }
+}
+
+/// Trace a 64-bit value as hex through the debug console.
+pub fn dbg_hex(tag: &str, v: u64) {
+    let mut p = Port::<u8>::new(0xe9);
+    for &b in tag.as_bytes() {
+        unsafe {
+            p.write(b);
+        }
+    }
+    unsafe {
+        p.write(b'=');
+    }
+    for i in (0..16).rev() {
+        let d = ((v >> (i * 4)) & 0xF) as u8;
+        let c = if d < 10 { b'0' + d } else { b'a' - 10 + d };
+        unsafe {
+            p.write(c);
+        }
+    }
+    unsafe {
+        p.write(b'\n');
     }
 }
 

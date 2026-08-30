@@ -38,18 +38,22 @@ pub fn init(boot_info: &BootInfo) -> Result<()> {
     let mut max_frame: FrameIdx = 0;
     let mut any_usable = false;
     for region in boot_info.memory_regions.iter() {
+        if region.kind != MemoryRegionKind::Usable {
+            continue;
+        }
         let start = region.start;
         let end = region.end;
         if start >= end {
             continue;
         }
+        // Only usable memory is managed by the bitmap; firmware may report
+        // reserved regions up to absurd addresses (e.g. a 3 GiB "hole" that
+        // ends near 1 TiB on our QEMU target), which must not inflate it.
         let frame_end = FrameIdx::from(end.div_ceil(4096));
         if frame_end > max_frame {
             max_frame = frame_end;
         }
-        if region.kind == MemoryRegionKind::Usable {
-            any_usable = true;
-        }
+        any_usable = true;
     }
     if !any_usable || max_frame == 0 {
         return Err(FrameInitError::NoUsableMemory);
@@ -65,7 +69,7 @@ pub fn init(boot_info: &BootInfo) -> Result<()> {
     // use afterwards, and the &'static mut is never re-taken while borrowed.
     let bits: &'static mut [u8] = unsafe { &mut *core::ptr::addr_of_mut!(BITMAP_STORAGE) };
 
-    let mut alloc = BitmapAllocator::new(bits, 0, total);
+    let mut alloc = BitmapAllocator::new_all_used(bits, 0, total);
 
     // Clear usable runs (bitmap starts all-used).
     let mut usable_bytes = 0u64;
@@ -154,5 +158,5 @@ pub fn test_frames() -> bool {
     if a == b {
         return false;
     }
-    alloc.free(a / 4096).is_ok() && alloc.check_invariants() && alloc.free(b / 4096).is_ok()
+    alloc.free(a).is_ok() && alloc.check_invariants() && alloc.free(b).is_ok()
 }

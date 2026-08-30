@@ -65,6 +65,25 @@ impl<'a> BitmapAllocator<'a> {
         }
     }
 
+    /// Variant for the kernel's "carve out" strategy: the bitmap starts
+    /// entirely *used* (`1` bits, e.g. a `[0xFF; N]` static), and the kernel
+    /// frees exactly the firmware-usable runs afterwards with
+    /// [`clear_range`]. The free counter starts at 0, so it stays consistent
+    /// with the bits.
+    pub fn new_all_used(bits: &'a mut [u8], base: FrameIdx, total: usize) -> Self {
+        assert!(
+            bits.len().saturating_mul(8) >= total,
+            "bitmap too small: {} bytes for {total} frames",
+            bits.len()
+        );
+        Self {
+            bits,
+            base,
+            total,
+            free: 0,
+        }
+    }
+
     pub const fn base(&self) -> FrameIdx {
         self.base
     }
@@ -313,6 +332,21 @@ mod tests {
         }
         // `reserve` takes *absolute* frame indices (like free_range).
         a.reserve(a.base() + 64, 8).unwrap();
+        assert!(a.check_invariants());
+    }
+
+    #[test]
+    fn all_used_carve_out_accounting() {
+        // Kernel strategy: bitmap starts all-used, usable runs are freed.
+        let mut bits = [0xFFu8; 8]; // 64 frames, all used
+        let mut a = BitmapAllocator::new_all_used(&mut bits, 0, 64);
+        assert_eq!(a.free_count(), 0);
+        a.clear_range(0, 16);
+        a.clear_range(32, 8);
+        assert_eq!(a.free_count(), 24);
+        assert!(a.check_invariants());
+        // Freed frames are allocatable again.
+        assert_eq!(a.alloc(), Some(0));
         assert!(a.check_invariants());
     }
 

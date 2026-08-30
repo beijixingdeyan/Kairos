@@ -1,15 +1,19 @@
-﻿//! User-space programs: baked ELF payloads + a minimal loader.
+//! User-space programs: baked ELF payloads + a minimal loader.
 //!
 //! The user programs (see `user/`) are regular static ELF binaries linked at
 //! [`USER_BASE`]. `kernel/build.rs` compiles them and the kernel embeds the
 //! bytes with `include_bytes!`. At spawn time [`load_user_program`] parses
-//! the ELF (PT_LOAD segments only 鈥?no dynamic linking, no relocations),
+//! the ELF (PT_LOAD segments only —no dynamic linking, no relocations),
 //! maps them into fresh physical frames with `USER` page flags and returns
 //! the entry point.
 //!
 //! Address space layout (shared, single-page-table kernel):
 //! ```text
-//! 0x10_0000_0000  USER_BASE         program image (text/rodata/data/bss)
+//! 0x10_0000_0000  USER_BASE           hello (16 MiB apart per program)
+//! 0x10_0100_0000  USER_BASE+0x1000000  echo_server
+//! 0x10_0200_0000                      echo_client
+//! 0x10_0300_0000                      counter
+//! 0x10_0400_0000                      deadline
 //! 0x11_0000_0000  USER_STACK_BASE   user stack (4 MiB, grows down)
 //! 0x11_0040_0000  USER_STACK_TOP
 //! 0x12_0000_0000  USER_FRAME_WINDOW zero-copy shared frames
@@ -17,6 +21,10 @@
 //! 0x40_0000_0000_0000  kernel heap (2^46)
 //! 0x80_0000_0000_0000  physical-memory offset (2^47, bootloader)
 //! ```
+//!
+//! The user programs (see `user/`) are static ELF binaries, each linked at
+//! its own base (kernel/build.rs passes the per-bin `-Ttext`); the loader
+//! maps them on demand and reuses already-mapped regions.
 
 use core::sync::atomic::AtomicU64;
 
@@ -137,6 +145,13 @@ fn install_segment(seg: &Seg, elf: &[u8]) -> Result<(), ()> {
         f
     };
 
+    // Already loaded (this or an earlier task mapped the same base): the
+    // image bytes are still resident, reuse them — programs coexist in the
+    // single shared address space at distinct bases.
+    if memory::paging::is_mapped(first) {
+        return Ok(());
+    }
+
     for i in 0..pages {
         let phys = memory::frames::alloc().ok_or(())?;
         memory::paging::map_page(phys, first + i * 4096, copy_flags).map_err(|_| ())?;
@@ -178,6 +193,9 @@ fn install_segment(seg: &Seg, elf: &[u8]) -> Result<(), ()> {
 }
 
 fn map_user_stack() -> Result<(), ()> {
+    if memory::paging::is_mapped(VirtAddr::new(USER_STACK_BASE)) {
+        return Ok(());
+    }
     let pages = (USER_STACK_SIZE / 4096) as u64;
     let flags = PageTableFlags::PRESENT
         | PageTableFlags::WRITABLE
@@ -192,8 +210,11 @@ fn map_user_stack() -> Result<(), ()> {
 }
 
 // Map the (single, interior-mutable) user frame window so frame
-/// capabilities can hand out writable user memory.
+/// capabilities can hand out writable user memory. Mapped exactly once.
 fn map_frame_window() -> Result<(), ()> {
+    if memory::paging::is_mapped(VirtAddr::new(USER_FRAME_WINDOW)) {
+        return Ok(());
+    }
     let pages = (USER_WINDOW_END - USER_FRAME_WINDOW) / 4096;
     let flags = PageTableFlags::PRESENT
         | PageTableFlags::WRITABLE
@@ -219,7 +240,7 @@ pub fn load_user_program(name: &str) -> Result<(&'static str, u64, u64), ()> {
     }
     map_user_stack()?;
     // The zero-copy frame window is shared address space: map it once for
-    // every user task (cheap 鈥?pages are demand-like mapped in advance).
+    // every user task (cheap —pages are demand-like mapped in advance).
     map_frame_window()?;
     Ok((canonical, entry, USER_STACK_TOP))
 }

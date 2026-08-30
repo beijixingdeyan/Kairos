@@ -1,17 +1,17 @@
-﻿//! Task management: preemptive, deterministic scheduling.
+//! Task management: preemptive, deterministic scheduling.
 //!
 //! Model
 //! -----
 //! A *task* is the unit of scheduling. Each task has:
 //! * a kernel stack (heap-allocated, page-roundable),
 //! * a **save area**: a [`CpuFrame`] that holds its registers whenever it is
-//!   not running 鈥?either the frame built at spawn (its first run) or the
+//!   not running —either the frame built at spawn (its first run) or the
 //!   frame an interrupt/syscall stored,
 //! * a capability space ([`CNode`]).
 //!
 //! Preemption: the PIT fires at 1 kHz; the timer ISR runs the policy
 //! ([`kairos_core::sched`]), and if the policy says "switch", the ISR simply
-//! *restores a different frame* 鈥?that *is* the context switch. No
+//! *restores a different frame* —that *is* the context switch. No
 //! memcpy of register files, no extra stacks.
 //!
 //! Blocking (sleep / IPC park / yield) from user mode reuses the same
@@ -174,6 +174,12 @@ pub fn spawn_kernel(
             fr.err = 0;
             fr.vec = 0;
             fr.rdi = arg as u64;
+            // Sanity values for the (spec-optional) rsp/ss slots of a
+            // ring-0 frame: some QEMU versions reload them on iretq even
+            // for a CPL-0→CPL-0 return, so they must point at this task's
+            // own kernel stack, never zero.
+            fr.user_rsp = e.kstack_top as u64;
+            fr.user_ss = crate::gdt::KERNEL_DATA.0 as u64;
         }
     })
 }
@@ -263,6 +269,11 @@ pub fn on_irq_after_eoi(frame: *mut CpuFrame) -> *mut CpuFrame {
     if SCHED.lock().is_none() {
         return frame;
     }
+    // Bootstrap pause: while set, the timer only acks and returns so the
+    // first task entry (enter_task_frame) cannot be disturbed by a dispatch.
+    if PAUSE_TIMER.load(core::sync::atomic::Ordering::SeqCst) {
+        return frame;
+    }
 
     let interrupted = running_id();
 
@@ -346,9 +357,24 @@ pub fn kernel_yield() {
     }
 }
 
-/// Wake a task parked by IPC (re-enters the ready queue).
+/// Wake a task parked by IPC (re-enters the ready queue) and rewind its
+/// syscall frame so the *same* operation is retried when it runs again:
+/// the syscall entry stub marks every syscall frame with `vec == 256`, and
+/// the `syscall` instruction is always 2 bytes (retry-rip = rip - 2).
+/// Without the rewind a woken sender/receiver would resume *after* its
+/// syscall with the syscall number in `rax` — i.e. the message is lost.
 pub fn wake_parked(id: TaskId) {
     with_sched_locked(|s| s.wake(id));
+    if let Some(e) = entry_mut(id) {
+        if e.is_user && !e.save_area.is_null() {
+            // # Safety: the save area belongs to this task; interrupts are
+            // off in every call site (IPC wake happens on syscall/IRQ path).
+            let fr = unsafe { &mut *e.save_area };
+            if fr.vec == 256 {
+                fr.rip = fr.rip.wrapping_sub(2);
+            }
+        }
+    }
 }
 
 /// The task currently holding the CPU (from the scheduler's view).
@@ -392,9 +418,9 @@ fn switch_to(next: Option<TaskId>, current: Option<TaskId>) -> *mut CpuFrame {
     match next {
         Some(id) => {
             // Point the hardware at the task that will run:
-            //  * TSS.rsp0 鈥?kernel stack for ring-3鈫? interrupts,
-            //  * GS area  鈥?kernel stack for the `syscall` instruction,
-            //  * restore flag 鈥?whether the stub must `swapgs` back.
+            //  * TSS.rsp0 —kernel stack for ring-3→ interrupts,
+            //  * GS area  —kernel stack for the `syscall` instruction,
+            //  * restore flag —whether the stub must `swapgs` back.
             let top = e_kstack_top(id);
             gdt::set_rsp0(VirtAddr::new(top));
             crate::syscall::gs_area().kstack.store(top, core::sync::atomic::Ordering::SeqCst);
@@ -460,17 +486,40 @@ pub fn boot_tasks() {
     }
 }
 
+/// Bootstrap pause flag: while set, the timer IRQ handler only acks and
+/// returns without dispatching. `kernel_main` sets it right before spawning
+/// the first task so that the very first `enter_task_frame` cannot race a
+/// context switch; the idle task clears it as its first act, after which
+/// normal preemption applies.
+static PAUSE_TIMER: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Set/clear the timer pause flag.
+pub fn set_timer_paused(p: bool) {
+    PAUSE_TIMER.store(p, core::sync::atomic::Ordering::SeqCst);
+}
+
 extern "C" fn idle_loop(_arg: usize) -> ! {
+    // End the bootstrap pause: from here on normal preemption applies.
+    PAUSE_TIMER.store(false, core::sync::atomic::Ordering::SeqCst);
     loop {
         x86_64::instructions::hlt();
     }
 }
 
-/// Hand execution to the shell task. Never returns.
-pub fn start_shell(id: TaskId) -> ! {
-    let area = entry_mut(id)
-        .map(|e| e.save_area)
-        .unwrap_or(core::ptr::null_mut());
+/// Hand execution to the scheduler's first dispatch (the idle task). The
+/// CPU *must* enter via a scheduler dispatch so that `running()` is correct
+/// from the very first instruction of user code — otherwise preemption
+/// bookkeeping (whose frame is on the stack) breaks immediately. Never
+/// returns.
+pub fn bootstrap_first_task() -> ! {
+    // One tick with nothing running forces `dispatch()`; with idle + shell
+    // registered the result is always `Some`.
+    let first = with_sched(|s| match s.on_tick() {
+        SchedAction::Preempt(next) => next,
+        _ => None,
+    });
+    let id = first.expect("bootstrap: no runnable task");
+    let area = entry_mut(id).map(|e| e.save_area).unwrap_or(core::ptr::null_mut());
     set_user_ret_flag(false);
     unsafe {
         crate::interrupts::enter_task_frame(area);

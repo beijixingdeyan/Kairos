@@ -5,6 +5,18 @@ os_project_prompt.txt
 /target/
 **/target/
 
+# --- extracted ELF of the embedded kernel (rebuilt every `cargo build`) ---
+/elfs/
+
+# --- transient debug captures (QEMU -d/-debugcon, runner scratch) ---
+qemu-int.log
+qemu-run.out
+dbgout.log
+boot.out
+r.out
+r.err
+r.code
+
 # --- local tooling (per-task constraint: downloads live inside the repo dir) ---
 /tools/
 
