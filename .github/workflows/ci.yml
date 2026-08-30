@@ -120,15 +120,18 @@ jobs:
         # guest output (a wedged boot shows exactly where it stopped).
         run: |
           set +e
-          KAIROS_TEST=1 KAIROS_QEMU=qemu-system-x86_64 timeout 300 \
-            cargo run -p os
+          KAIROS_TEST=1 KAIROS_QEMU=qemu-system-x86_64 timeout 180 \
+            cargo run -p os -d int -D /tmp/kairos-int-test.log
           code=$?
           echo "runner exit: $code"
+          echo "--- qemu -d int log (tail) ---"
+          tail -c 6000 /tmp/kairos-int-test.log 2>/dev/null || echo "(no int log)"
           [ $code -eq 124 ] && { echo "TIMED OUT: the in-guest self-tests \
           did not finish; last guest output above"; exit 1; }
           exit $code
 
       - name: Boot without self-tests (shell milestone, 15 s watchdog)
+        if: always()
         run: |
           set +e
           timeout 15 bash -c 'KAIROS_QEMU=qemu-system-x86_64 cargo run -p os \
