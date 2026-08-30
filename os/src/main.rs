@@ -139,6 +139,7 @@ fn main() {
                 ) {
                     Ok(s) => {
                         conn = Some(s);
+                        eprintln!("[runner] serial console connected");
                         break;
                     }
                     Err(e) => {
