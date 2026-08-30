@@ -1,4 +1,4 @@
-﻿name: CI
+name: CI
 
 on:
   push:
@@ -109,13 +109,31 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Install QEMU
-        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86
+      - name: Cache the QEMU 9.2 build
+        uses: actions/cache@v4
+        with:
+          path: /opt/kairos-qemu
+          key: kairos-qemu-9.2.0
 
-      - name: Check KVM availability
+      - name: Build QEMU 9.2 from source (cached)
+        # apt's qemu 8.2 + SeaBIOS never finishes POST on this image (the
+        # guest hangs in SMM with an endless vector-0x08 timer flood under
+        # TCG, KVM, icount and nodefaults alike). Build 9.2.0 - the same
+        # generation as the QEMU the local development and verification
+        # used - once, and cache the install under /opt/kairos-qemu.
         run: |
-          ls -l /dev/kvm && echo "KVM available"
-          sudo chmod 666 /dev/kvm || true
+          if [ ! -x /opt/kairos-qemu/bin/qemu-system-x86_64 ]; then
+            sudo apt-get install -y build-essential ninja-build pkg-config \
+              libglib2.0-dev libpixman-1-dev zlib1g-dev libfdt-dev
+            wget -q https://download.qemu.org/qemu-9.2.0.tar.xz -O /tmp/qemu.tar.xz
+            tar -xf /tmp/qemu.tar.xz -C /tmp
+            cd /tmp/qemu-9.2.0
+            ./configure --target-list=x86_64-softmmu --prefix=/opt/kairos-qemu \
+              --disable-docs --disable-pie
+            make -j"$(nproc)"
+            sudo make install
+          fi
+          /opt/kairos-qemu/bin/qemu-system-x86_64 --version | head -n 1
 
       - name: Build boot image
         run: cargo build -p os
@@ -125,30 +143,22 @@ jobs:
         # guest output (a wedged boot shows exactly where it stopped).
         run: |
           set +e
-          KAIROS_TEST=1 KAIROS_QEMU=qemu-system-x86_64 timeout 300 \
-            cargo run -p os -- -accel kvm -cpu max -nodefaults -d int -D /tmp/kairos-int-test.log
+          KAIROS_TEST=1 KAIROS_QEMU=/opt/kairos-qemu/bin/qemu-system-x86_64 \
+            timeout 300 cargo run -p os
           code=$?
           echo "runner exit: $code"
-          echo "--- qemu -d int log (head 40K) ---"
-          head -c 40000 /tmp/kairos-int-test.log 2>/dev/null || echo "(no int log)"
-          echo "--- qemu -d int log (tail 8K) ---"
-          tail -c 8000 /tmp/kairos-int-test.log 2>/dev/null || echo "(no int log)"
           [ $code -eq 124 ] && { echo "TIMED OUT: the in-guest self-tests \
           did not finish; last guest output above"; exit 1; }
           exit $code
 
-      - name: Boot without self-tests (shell milestone, 45 s watchdog)
+      - name: Boot without self-tests (shell milestone, 60 s watchdog)
         if: always()
         run: |
           set +e
-          timeout 45 bash -c 'KAIROS_QEMU=qemu-system-x86_64 cargo run -p os -- \
-            -accel kvm -cpu max -nodefaults -d int -D /tmp/kairos-int.log < /dev/null \
+          timeout 60 bash -c 'KAIROS_QEMU=/opt/kairos-qemu/bin/qemu-system-x86_64 \
+            cargo run -p os < /dev/null \
             | tee /tmp/kairos-boot.log' || true
           echo "--- guest output (tail) ---"
           tail -c 3000 /tmp/kairos-boot.log
-          echo "--- qemu -d int log (head 40K) ---"
-          head -c 40000 /tmp/kairos-int.log 2>/dev/null || echo "(no int log)"
-          echo "--- qemu -d int log (tail 4K) ---"
-          tail -c 4000 /tmp/kairos-int.log 2>/dev/null || echo "(no int log)"
           grep -Eq "kairos shell .*type \`help\`" /tmp/kairos-boot.log || \
             { echo "shell banner not seen"; exit 1; }
