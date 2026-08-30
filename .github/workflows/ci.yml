@@ -142,29 +142,35 @@ jobs:
       - name: Build boot image
         run: cargo build -p os
 
-      - name: Boot under QEMU with in-guest self-tests
-        # `timeout` turns a hang into a visible failure and prints the last
-        # guest output (a wedged boot shows exactly where it stopped).
+      - name: Fingerprint the boot image (compare against local builds)
+        run: |
+          IMG=$(ls -t target/debug/build/os/*/out/kairos-bios.img | head -1)
+          echo "image: $IMG"
+          sha256sum "$IMG"
+
+      - name: Boot with in-guest self-tests (slow-clock probe, 25 min)
+        # The hosted runner's guest clock ticks at ~1/55 (vector-0x08 at
+        # ~18 Hz), so a normal boot may need 10-20 min there. Probe the
+        # interrupt-log growth every minute to see whether the guest is
+        # progressing slowly or fully stuck.
         run: |
           set +e
           KAIROS_TEST=1 KAIROS_QEMU=/opt/kairos-qemu/bin/qemu-system-x86_64 \
-            timeout 300 cargo run -p os -- -d int -D /tmp/kairos-int-test.log
+            timeout 1500 cargo run -p os -- -d int -D /tmp/kairos-int-test.log &
+          rpid=$!
+          for i in $(seq 1 15); do
+            sleep 60
+            if [ -f /tmp/kairos-int-test.log ]; then
+              echo "t=${i}min lines=$(wc -l < /tmp/kairos-int-test.log) flood=$(grep -c 'INT=0x08' /tmp/kairos-int-test.log)"
+            fi
+            kill -0 $rpid 2>/dev/null || break
+          done
+          wait $rpid
           code=$?
           echo "runner exit: $code"
-          echo "--- int log structure ---"
-          if [ -f /tmp/kairos-int-test.log ]; then
-            echo "bytes: $(stat -c %s /tmp/kairos-int-test.log) lines: $(wc -l < /tmp/kairos-int-test.log)"
-            echo "smm: $(grep -c 'SMM: enter' /tmp/kairos-int-test.log)"
-            echo "exceptions: $(grep -cE 'check_exception|injected' /tmp/kairos-int-test.log)"
-            echo "--- head 10 ---"; head -10 /tmp/kairos-int-test.log | cut -c1-80
-            echo "--- mid 4 ---"; sed -n "$(( $(wc -l < /tmp/kairos-int-test.log) / 2 )),+3p" /tmp/kairos-int-test.log | cut -c1-80
-            echo "--- tail 4 ---"; tail -4 /tmp/kairos-int-test.log | cut -c1-80
-            echo "flood lines: $(grep -c 'INT=0x08' /tmp/kairos-int-test.log)"
-          else
-            echo "(no int log)"
-          fi
-          [ $code -eq 124 ] && { echo "TIMED OUT: the in-guest self-tests \
-          did not finish; last guest output above"; exit 1; }
+          echo "--- guest output (tail) ---"
+          tail -c 2000 /tmp/kairos-boot.log 2>/dev/null || true
+          [ $code -eq 124 ] && { echo "TIMED OUT: no completion in 25 min"; exit 1; }
           exit $code
 
       - name: Upload the guest interrupt trace for offline analysis
@@ -175,14 +181,14 @@ jobs:
           path: /tmp/kairos-int-test.log
           if-no-files-found: ignore
 
-      - name: Boot without self-tests (shell milestone, MTTCG, 90 s watchdog)
+      - name: Boot without self-tests (shell milestone, 20 min watchdog)
         if: always()
         run: |
           set +e
-          timeout 90 bash -c 'KAIROS_QEMU=/opt/kairos-qemu/bin/qemu-system-x86_64 \
-            cargo run -p os -- -accel tcg,thread=multi < /dev/null \
+          timeout 1200 bash -c 'KAIROS_QEMU=/opt/kairos-qemu/bin/qemu-system-x86_64 \
+            cargo run -p os < /dev/null \
             | tee /tmp/kairos-boot.log' || true
           echo "--- guest output (tail) ---"
-          tail -c 3000 /tmp/kairos-boot.log
+          tail -c 5000 /tmp/kairos-boot.log
           grep -Eq "kairos shell .*type \`help\`" /tmp/kairos-boot.log || \
             { echo "shell banner not seen"; exit 1; }
