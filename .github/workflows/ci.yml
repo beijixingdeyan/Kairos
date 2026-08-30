@@ -109,16 +109,11 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Install QEMU (9.x from PPA; 8.2's SeaBIOS never finishes POST)
-        # apt's qemu-8.2/SeaBIOS wedges in SMM during POST on the hosted
-        # runner (the -d int log never leaves vector 0x08), so pull the
-        # PPA's qemu 9.x - the same generation as the QEMU used for the
-        # verified local boot (TCG timing matches too).
-        run: |
-          sudo add-apt-repository -y ppa:jacob/virtualisation
-          sudo apt-get update
-          sudo apt-get install -y qemu-system-x86
-          qemu-system-x86_64 --version | head -n 1
+      - name: Install QEMU
+        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86
+
+      - name: Check KVM availability
+        run: ls -l /dev/kvm && echo "KVM available"
 
       - name: Build boot image
         run: cargo build -p os
@@ -129,7 +124,7 @@ jobs:
         run: |
           set +e
           KAIROS_TEST=1 KAIROS_QEMU=qemu-system-x86_64 timeout 300 \
-            cargo run -p os -- -machine pc,smm=off -icount shift=auto -d int -D /tmp/kairos-int-test.log
+            cargo run -p os -- -accel kvm -cpu max -d int -D /tmp/kairos-int-test.log
           code=$?
           echo "runner exit: $code"
           echo "--- qemu -d int log (head 40K) ---"
@@ -145,7 +140,7 @@ jobs:
         run: |
           set +e
           timeout 45 bash -c 'KAIROS_QEMU=qemu-system-x86_64 cargo run -p os -- \
-            -machine pc,smm=off -icount shift=auto -d int -D /tmp/kairos-int.log < /dev/null \
+            -accel kvm -cpu max -d int -D /tmp/kairos-int.log < /dev/null \
             | tee /tmp/kairos-boot.log' || true
           echo "--- guest output (tail) ---"
           tail -c 3000 /tmp/kairos-boot.log
