@@ -19,10 +19,10 @@
 | 最小 TCB | 内核只含必要机制 | 文件/网络/驱动均不在内核；unsafe 集合即 TCB 近似 | ✅ |
 | 驱动隔离 | 驱动不进内核（结构上隔离） | shell 中 `ipcdemo` 由用户态任务承担；驱动框架见 §3 | 🚧 |
 | 能力系统 | 基于能力而非身份 | `kairos-core::caps` + 内核 `caps.rs` 对象注册表 + `spawn` 拒绝演示 | ✅ |
-| 单元测试 | 覆盖核心逻辑 | `kairos-core` 41 例 + 内核内自检 | ✅ |
+| 单元测试 | 覆盖核心逻辑 | `kairos-core` 42 例 + 内核内自检 | ✅ |
 | QEMU 集成测试 | 在 QEMU 里跑集成测试 | `KAIROS_TEST=1 cargo run -p os` → 退出码 | ✅ |
 | 模糊测试 | 对核心逻辑做模糊/属性测试 | `fuzz/` proptest（调度/通道/分配器） | ✅ |
-| 覆盖率 >70% | 指标 | 核心纯逻辑目标 >70%；CI 中留 `llvm-cov` 输出点 | 🚧 |
+| 覆盖率 >70% | 指标 | CI 覆盖任务：`cargo llvm-cov` 统计 `kairos-core`+`fuzz` 行覆盖率并 >70% 门禁；`make coverage` 本地复现 | ✅ |
 | CI | GitHub Actions | `.github/workflows/ci.yml`（host + QEMU） | ✅ |
 | 文档 | 中文设计文档 + 阶段说明 | `docs/` 三件套 + README | ✅ |
 | 隐私 | 上传 GitHub 无隐私信息 | `os_project_prompt.txt`、`tools/`、`target/` 全部 gitignore | ✅ |
@@ -67,10 +67,11 @@
 - `KAIROS_SCHED_POLICY=edf` + `deadline` 程序已可演示周期任务与 miss 统计；
 - 下一步：MPSC 优先级继承（经典优先级反转演示）、多核（见 §3.6）。
 
-### 3.5 过程内模糊/覆盖率（🚧）
+### 3.5 过程内模糊/覆盖率（已完成基础版，待扩充）
 
-- CI 中运行 `llvm-cov` 统计 `kairos-core` 覆盖率并断言 >70%；
-- `fuzz` 增加：能力派生序列、IPC 协议 with 损坏消息、位图碎片化序列。
+- ✅ CI 已实现：`cargo llvm-cov` 统计 `kairos-core`+`fuzz` 覆盖率并断言 >70%
+  （`.github/workflows/ci.yml` 的 `coverage` job；本地 `make coverage` 复现）；
+- ⬜ `fuzz` 扩展：能力派生序列、IPC 协议 with 损坏消息、位图碎片化序列。
 
 ### 3.6 SMP（⬜）
 

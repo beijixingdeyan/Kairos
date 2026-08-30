@@ -78,7 +78,7 @@ fn run_cmd(cmd: &str) {
         "crash" => cmd_crash(),
         "spawn" => {
             let Some(prog) = parts.next() else {
-                serial::write_line("usage: spawn <hello|counter|deadline>");
+                serial::write_line("usage: spawn <hello|counter|deadline|echo_server|echo_client>");
                 return;
             };
             match task::spawn_user(prog, 4, 1) {
@@ -114,7 +114,7 @@ fn cmd_help() {
     serial::write_line("  info                 system overview");
     serial::write_line("  sched                scheduler policy + quantum");
     serial::write_line("  ps                   task list with scheduling stats");
-    serial::write_line("  spawn <prog>         run a user program (hello|counter|deadline)");
+    serial::write_line("  spawn <prog>         run a user program (hello|counter|deadline|echo_*)");
     serial::write_line("  ipcdemo              spawn echo server+client (IPC demo)");
     serial::write_line("  echo <text>          print text");
     serial::write_line("  fault                trigger a page fault (panic demo)");

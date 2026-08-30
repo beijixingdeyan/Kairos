@@ -126,6 +126,22 @@ fn open_console() -> std::io::Result<Box<dyn Console>> {
 }
 
 fn main() {
+    // Windows host timers default to a ~15.6 ms quantum. Raising this
+    // process's timer resolution to 1 ms is standard hygiene for QEMU
+    // runners; on this host it did not measurably change the guest clock
+    // (the underlying limit is QEMU's own virtual-clock delivery), but it
+    // is harmless and helps other host paths. Best-effort: ignore errors.
+    #[cfg(windows)]
+    {
+        #[link(name = "winmm")]
+        unsafe extern "system" {
+            fn timeBeginPeriod(uPeriod: u32) -> u32;
+        }
+        unsafe {
+            let _ = timeBeginPeriod(1);
+        }
+    }
+
     // QEMU binary: $KAIROS_QEMU, or the in-repo copy under tools/qemu.
     let qemu = std::env::var("KAIROS_QEMU").unwrap_or_else(|_| {
         let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
@@ -186,6 +202,13 @@ fn main() {
         "1",
     ]);
     cmd.args(&extra);
+    // Note: `-icount` was evaluated for deterministic wall timing but, on
+    // this QEMU build (Windows TCG), it makes guest timer delivery fast
+    // enough (~600 Hz) to expose rare lock-holder-preemption races in the
+    // scheduler, wedging task registration. The default (no icount) is
+    // stable; see docs/ARCHITECTURE.md "Timing and emulation" for the
+    // trade-offs and how to pass `-icount shift=auto` for wall-accurate
+    // timing when emphasizing responsiveness over robustness.
     // On Windows the console travels over the socket; otherwise QEMU
     // inherits our stdio directly and must not be double-wired.
     if cfg!(windows) {

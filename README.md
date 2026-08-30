@@ -37,7 +37,7 @@
 | **用户态程序** | 5 个内置 ELF（hello / echo 客户端-服务端 / counter / 实时截止任务），链接在 `0x10_0000_0000`，静态页表共享地址空间 |
 | **实时演示** | EDF 策略 + 周期任务（period/budget），调度器统计 deadline miss 并在 `ps` 中展示 |
 | **引导链** | SeaBIOS → `bootloader` crate 0.11（FAT32 MBR）→ long mode → 内核入口 |
-| **测试** | 主机侧单元测试（kairos-core 41 例）+ 属性测试（proptest，调度/通道/分配器对照模型）+ QEMU 集成测试（内核自检 + 退出码） |
+| **测试** | 主机侧单元测试（kairos-core 42 例）+ 属性测试（proptest，调度/通道/分配器对照模型）+ QEMU 集成测试（内核自检 + 退出码）+ CI 覆盖率门禁 >70%（`cargo llvm-cov`） |
 
 ## 技术栈与工具链
 

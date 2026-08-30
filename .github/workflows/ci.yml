@@ -40,6 +40,50 @@ jobs:
       - name: clippy (host crates)
         run: cargo clippy -p kairos-core -p fuzz -- -D warnings
 
+  coverage:
+    name: Coverage (kairos-core, >70% gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (pinned nightly)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_NIGHTLY }}
+          targets: x86_64-unknown-none
+          components: rust-src, llvm-tools
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Measure line coverage of the host-testable core
+        run: |
+          cargo llvm-cov -p kairos-core -p fuzz \
+            --lcov --output-path coverage.lcov
+          cargo llvm-cov report --summary-only
+
+      - name: Gate coverage at 70%
+        run: |
+          THRESHOLD=70
+          COV=$(cargo llvm-cov report --summary-only | grep -E '^TOTAL' | awk '{gsub("%","",$NF); print $NF}')
+          echo "core line coverage: ${COV}%"
+          awk "BEGIN{exit !($COV >= $THRESHOLD)}" \
+            || { echo "coverage ${COV}% below gate ${THRESHOLD}%"; exit 1; }
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-lcov
+          path: coverage.lcov
+
   qemu-integration:
     name: QEMU integration (boot + self-tests)
     runs-on: ubuntu-latest

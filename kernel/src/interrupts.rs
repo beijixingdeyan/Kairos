@@ -450,11 +450,14 @@ fn pic_remap() {
     }
 }
 
-/// Start PIT channel 0 at 1 kHz (period = 1 ms tick).
+/// Start PIT channel 0 at the compiled tick rate (default 1 kHz → 1 ms
+/// tick). The rate is `kairos_core::config::TICK_HZ`（内核编译期配置
+/// `KAIROS_TICK_HZ`），可在模拟器拖慢虚拟时钟的宿主上补偿——见
+/// docs/ARCHITECTURE.md 第 8 节。
 fn pit_init() {
     const PIT_FREQ: u32 = 1_193_182;
-    const TARGET_HZ: u32 = 1000;
-    let divisor = (PIT_FREQ / TARGET_HZ) as u16;
+    let target_hz = kairos_core::config::TICK_HZ.clamp(1, PIT_FREQ as u64 / 2) as u32;
+    let divisor = (PIT_FREQ / target_hz) as u16;
 
     let mut cmd = Port::<u8>::new(0x43);
     let mut ch0 = Port::<u8>::new(0x40);

@@ -162,3 +162,34 @@ cargo run -p os
   ├─ -drive format=raw,file=<img> -serial mon:stdio -device isa-debug-exit
   └─ guest 0x10 → 0 ；0x11 → 1 ；其它 → 2
 ```
+
+## 8. 时间与模拟（Timing and emulation）
+
+**设计语义**：内核的全部时序语义都在**来宾虚拟时间内**定义——PIT 以
+1 kHz 走 tick（`kernel/src/interrupts.rs` 的 `TARGET_HZ=1000`，可经
+`KAIROS_TICK_HZ`… 编译期调整）——调度器、sleep、miss 统计全部以 tick
+为基准，因此**与墙钟无关地确定**。调度器的确定性是可复现的：同样的
+程序序列在任何（确实跑得动的）速率下得到同样的调度决策序列。
+
+**实测墙钟表现**（本机 Windows + 项目自带 QEMU 9.2-dev，TCG 解释模式）：
+
+| 场景 | 实测 | 说明 |
+| --- | --- | --- |
+| 无 icount（默认） | PIT ~65 Hz 墙钟 | 宿主 15.6 ms 定时器量子把 QEMU 虚拟钟拖慢约 15×；所有交互/休眠墙钟变慢 ~15×，但功能正确 |
+| `-icount shift=8` | ~650 Hz 墙钟 | 虚拟钟改由执行的指令推进（确定性计时模式），接近 1 kHz |
+| `-icount shift=auto` | ~175 Hz 墙钟 | 自适应档 |
+
+**为什么默认不开 `-icount`**：把 tick 速率抬到 ~600 Hz 后，来宾内核对
+“锁持有者被抢占”的窗口暴露概率上升（tests 环境里表现出首次任务注册偶发
+卡死：`new_task` 在 `SCHED.lock()` 处自旋，而持锁者因中断被抢占无法
+恢复——单核自旋锁的经典风险）。锁纪律（`with_sched` 关 IF、`serial.rs`
+关 IF）在慢时钟下已足够，快时钟下需要进一步收敛持有窗口或改用
+中断门禁锁。这属于教学的“正确且诚实”的取舍：默认配置稳定可演示，墙钟
+延时可接受；需要贴墙钟实时性时用 `-icount shift=8` 提升吞吐，或改用
+KVM（Linux 宿主 `-accel kvm` 下 PIT 精确 1 kHz）。
+
+**所以对“性能与延迟”的诚实回答**：
+- 内核内延迟 = 1 tick（~1 ms 来宾时间），系统调用为直接路径（LSTAR，无
+  任务切换），实测吞吐量不受墙钟影响；
+- 墙钟交互延迟受宿主模拟器限制（Windows 15.6 ms 量子），非内核问题；
+  在 Linux/KVM 或支持 1 ms 精度的宿主上即为 ~1 ms。
