@@ -1,4 +1,4 @@
-﻿name: CI
+name: CI
 
 on:
   push:
@@ -109,8 +109,16 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Install QEMU
-        run: sudo apt-get update && sudo apt-get install -y qemu-system-x86
+      - name: Install QEMU (9.x from PPA; 8.2's SeaBIOS never finishes POST)
+        # apt's qemu-8.2/SeaBIOS wedges in SMM during POST on the hosted
+        # runner (the -d int log never leaves vector 0x08), so pull the
+        # PPA's qemu 9.x - the same generation as the QEMU used for the
+        # verified local boot (TCG timing matches too).
+        run: |
+          sudo add-apt-repository -y ppa:jacob/virtualisation
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86
+          qemu-system-x86_64 --version | head -n 1
 
       - name: Build boot image
         run: cargo build -p os
