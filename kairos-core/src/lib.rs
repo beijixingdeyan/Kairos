@@ -2,7 +2,7 @@
 //!
 //! `kairos-core` contains everything that is *pure logic* and therefore must
 //! be trivially testable on the host, fuzzable, and cross-compilable to any
-//! freestanding target (x86_64, RISC-V, ARM). It has **no dependencies**,
+//! freestanding target (`x86_64`, RISC-V, ARM). It has **no dependencies**,
 //! no I/O and no unsafe code: the architecture rule is that every decision
 //! that can be made without touching hardware lives here, so that the kernel
 //! itself shrinks to thin, auditable hardware drivers.

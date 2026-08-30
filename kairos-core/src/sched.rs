@@ -96,6 +96,7 @@ pub enum PolicyKind {
 }
 
 impl PolicyKind {
+    #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
             PolicyKind::RoundRobin => "round-robin",
@@ -160,6 +161,7 @@ impl fmt::Display for SchedError {
 
 impl Scheduler {
     /// `quantum_ticks`: length of one scheduling quantum in timer ticks.
+    #[must_use]
     pub fn new(kind: PolicyKind, quantum_ticks: u64) -> Self {
         Self {
             kind,
@@ -174,18 +176,22 @@ impl Scheduler {
         }
     }
 
+    #[must_use]
     pub fn kind(&self) -> PolicyKind {
         self.kind
     }
 
+    #[must_use]
     pub fn ticks(&self) -> u64 {
         self.ticks
     }
 
+    #[must_use]
     pub fn running(&self) -> Option<TaskId> {
         self.running
     }
 
+    #[must_use]
     pub fn ready_count(&self) -> usize {
         if self.ready_tail >= self.ready_head {
             self.ready_tail - self.ready_head
@@ -195,6 +201,7 @@ impl Scheduler {
     }
 
     /// Total number of tasks in the table (any state).
+    #[must_use]
     pub fn task_count(&self) -> usize {
         self.tasks.iter().filter(|t| t.is_some()).count()
     }
@@ -205,6 +212,7 @@ impl Scheduler {
             .position(|t| t.as_ref().is_some_and(|r| r.id == id))
     }
 
+    #[must_use]
     pub fn task(&self, id: TaskId) -> Option<&TaskRec> {
         self.slot_of(id).and_then(|i| self.tasks[i].as_ref())
     }
@@ -214,6 +222,12 @@ impl Scheduler {
     }
 
     /// Register a new task in the Ready state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SchedError::AlreadyRegistered`] when `id` is already in the
+    /// table and [`SchedError::TableFull`] when the task table is at
+    /// capacity.
     pub fn register(
         &mut self,
         id: TaskId,
@@ -227,11 +241,11 @@ impl Scheduler {
         let slot = self
             .tasks
             .iter()
-            .position(|t| t.is_none())
+            .position(Option::is_none)
             .ok_or(SchedError::TableFull)?;
         let mut rec = TaskRec::new(id, priority.max(1), weight.max(1), deadline);
-        if deadline.is_some() {
-            rec.next_deadline_ticks = self.ticks + deadline.unwrap().period;
+        if let Some(deadline) = deadline {
+            rec.next_deadline_ticks = self.ticks + deadline.period;
         }
         self.tasks[slot] = Some(rec);
         self.enqueue_ready(id);
@@ -239,6 +253,10 @@ impl Scheduler {
     }
 
     /// Remove a finished task entirely.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SchedError::UnknownTask`] when `id` is not registered.
     pub fn unregister(&mut self, id: TaskId) -> Result<(), SchedError> {
         let slot = self.slot_of(id).ok_or(SchedError::UnknownTask(id))?;
         if self.running == Some(id) {
@@ -298,11 +316,11 @@ impl Scheduler {
 
     /// Wake a blocked task.
     pub fn wake(&mut self, id: TaskId) {
-        if let Some(r) = self.task_mut(id) {
-            if r.state == TaskState::Blocked {
-                r.state = TaskState::Ready;
-                self.enqueue_ready(id);
-            }
+        if let Some(r) = self.task_mut(id)
+            && r.state == TaskState::Blocked
+        {
+            r.state = TaskState::Ready;
+            self.enqueue_ready(id);
         }
     }
 
@@ -327,12 +345,13 @@ impl Scheduler {
         // EDF bookkeeping: deadlines roll over, misses are counted.
         if self.kind == PolicyKind::EarliestDeadlineFirst {
             for t in self.tasks.iter_mut().flatten() {
-                if let Some(d) = t.deadline {
-                    if t.state != TaskState::Finished && now >= t.next_deadline_ticks {
-                        t.stats.deadline_misses += 1;
-                        t.next_deadline_ticks = now + d.period;
-                        t.budget_remaining_ticks = d.budget;
-                    }
+                if let Some(d) = t.deadline
+                    && t.state != TaskState::Finished
+                    && now >= t.next_deadline_ticks
+                {
+                    t.stats.deadline_misses += 1;
+                    t.next_deadline_ticks = now + d.period;
+                    t.budget_remaining_ticks = d.budget;
                 }
             }
         }
@@ -351,10 +370,10 @@ impl Scheduler {
             if r.stats.total_ticks == 0 {
                 r.stats.total_ticks = 1; // avoid pathological wrap at exactly 0
             }
-            if is_edf {
-                if r.budget_remaining_ticks > 0 {
-                    r.budget_remaining_ticks -= 1;
-                }
+            if is_edf
+                && r.budget_remaining_ticks > 0
+            {
+                r.budget_remaining_ticks -= 1;
             }
         }
 
@@ -418,9 +437,7 @@ impl Scheduler {
     /// Select the next task to dispatch. Never blocks.
     fn dispatch(&mut self) -> Option<TaskId> {
         loop {
-            let Some(id) = self.dequeue_ready() else {
-                return None;
-            };
+            let id = self.dequeue_ready()?;
             let Some(rec) = self.task_mut(id) else {
                 continue; // stale entry
             };
@@ -444,10 +461,10 @@ impl Scheduler {
                     r.state = TaskState::Running;
                     r.stats.runs += 1;
                     // EDF: snapshot budget for the new run.
-                    if is_edf {
-                        if let Some(d) = r.deadline {
-                            r.budget_remaining_ticks = d.budget;
-                        }
+                    if is_edf
+                        && let Some(d) = r.deadline
+                    {
+                        r.budget_remaining_ticks = d.budget;
                     }
                 }
                 self.running = Some(c);
@@ -491,11 +508,12 @@ impl Scheduler {
             let mut edf_best = None;
             let mut edf_dl = u64::MAX;
             for t in self.tasks.iter().flatten() {
-                if t.state == TaskState::Ready && t.deadline.is_some() {
-                    if t.next_deadline_ticks < edf_dl {
-                        edf_dl = t.next_deadline_ticks;
-                        edf_best = Some(t.id);
-                    }
+                if t.state == TaskState::Ready
+                    && t.deadline.is_some()
+                    && t.next_deadline_ticks < edf_dl
+                {
+                    edf_dl = t.next_deadline_ticks;
+                    edf_best = Some(t.id);
                 }
             }
             return edf_best;

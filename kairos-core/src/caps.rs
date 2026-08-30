@@ -59,6 +59,7 @@ impl CapRights {
     pub const CALL: CapRights = CapRights(1 << 2); // can invoke (send/recv/spawn)
     pub const ALL: CapRights = CapRights(Self::READ.0 | Self::WRITE.0 | Self::CALL.0);
 
+    #[must_use]
     pub const fn new(read: bool, write: bool, call: bool) -> Self {
         let mut r = 0u8;
         if read {
@@ -73,20 +74,24 @@ impl CapRights {
         Self(r)
     }
 
+    #[must_use]
     pub const fn is_empty(self) -> bool {
         self.0 == 0
     }
 
     /// Raw rights mask (for serialising capabilities).
+    #[must_use]
     pub const fn bits(self) -> u8 {
         self.0
     }
 
+    #[must_use]
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }
 
     /// Narrow: keep only the rights that both `self` and `mask` allow.
+    #[must_use]
     pub const fn intersect(self, mask: Self) -> Self {
         Self(self.0 & mask.0)
     }
@@ -113,6 +118,7 @@ pub struct Capability {
 }
 
 impl Capability {
+    #[must_use]
     pub const fn new(object: u32, kind: ObjectKind, rights: CapRights) -> Self {
         Self {
             object,
@@ -121,6 +127,7 @@ impl Capability {
         }
     }
 
+    #[must_use]
     pub fn has_rights(&self, required: CapRights) -> bool {
         self.rights.contains(required)
     }
@@ -173,6 +180,7 @@ impl fmt::Display for CapError {
 }
 
 impl CNode {
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             slots: [None; CNODE_CAPACITY],
@@ -180,6 +188,14 @@ impl CNode {
     }
 
     /// Insert a capability into the first free slot; returns its slot index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CapError::SpaceFull`] when every slot is already occupied.
+    // SAFETY: slot indices are enumerations of `slots` (length
+    // `CNODE_CAPACITY` = 64), which always fits in `Slot` (u16) — the `as`
+    // truncation is purely nominal; the value can never lose bits.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn insert(&mut self, cap: Capability) -> Result<Slot, CapError> {
         for (i, slot) in self.slots.iter_mut().enumerate() {
             if slot.is_none() {
@@ -191,6 +207,11 @@ impl CNode {
     }
 
     /// Insert at a specific slot; fails if the slot is occupied.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CapError::NoSuchSlot`] when `slot` is out of bounds and
+    /// [`CapError::AlreadyOccupied`] when the slot already holds a capability.
     pub fn insert_at(&mut self, slot: Slot, cap: Capability) -> Result<(), CapError> {
         let s = self
             .slots
@@ -204,6 +225,10 @@ impl CNode {
     }
 
     /// Look up a capability without consuming it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CapError::NoSuchSlot`] when `slot` is out of bounds or empty.
     pub fn lookup(&self, slot: Slot) -> Result<&Capability, CapError> {
         self.slots
             .get(slot as usize)
@@ -213,6 +238,12 @@ impl CNode {
     }
 
     /// Look up a capability and check that it has `required` rights.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CapError::NoSuchSlot`] when `slot` is out of bounds or empty,
+    /// and [`CapError::RightsTooNarrow`] when the capability lacks any of the
+    /// `required` rights.
     pub fn lookup_with(&self, slot: Slot, required: CapRights) -> Result<&Capability, CapError> {
         let cap = self.lookup(slot)?;
         if cap.has_rights(required) {
@@ -223,6 +254,10 @@ impl CNode {
     }
 
     /// Remove and return the capability at `slot`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CapError::NoSuchSlot`] when `slot` is out of bounds or empty.
     pub fn revoke(&mut self, slot: Slot) -> Result<Capability, CapError> {
         let s = self
             .slots
@@ -234,6 +269,13 @@ impl CNode {
     /// Duplicate a capability into this space with rights *narrowed* by
     /// `mask` — the seL4-style "derive" without `GRANT`, so a receiver can
     /// never hand out more rights than it holds itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CapError::NoSuchSlot`] when `slot` does not hold a
+    /// capability in `source`, [`CapError::RightsTooNarrow`] when `mask`
+    /// grants no rights, or [`CapError::SpaceFull`] when this space has no
+    /// free slot.
     pub fn derive(&mut self, source: &CNode, slot: Slot, mask: CapRights) -> Result<Slot, CapError> {
         let src = source.lookup(slot)?;
         let narrowed = Capability {
@@ -247,16 +289,27 @@ impl CNode {
     }
 
     /// Number of occupied slots.
+    #[must_use]
     pub fn occupied(&self) -> usize {
         self.slots.iter().filter(|s| s.is_some()).count()
     }
 
     /// First free slot, if any.
+    // SAFETY: only indices < `CNODE_CAPACITY` (64) are ever produced, which
+    // always fit in `Slot` (u16) — the `as` truncation is purely nominal.
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
     pub fn first_free(&self) -> Option<Slot> {
-        self.slots.iter().position(|s| s.is_none()).map(|i| i as Slot)
+        self.slots
+            .iter()
+            .position(Option::is_none)
+            .map(|i| i as Slot)
     }
 
     /// Iterate over occupied slots in index order.
+    // SAFETY: only indices < `CNODE_CAPACITY` (64) are ever produced, which
+    // always fit in `Slot` (u16) — the `as` truncation is purely nominal.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn iter(&self) -> impl Iterator<Item = (Slot, &Capability)> {
         self.slots
             .iter()
@@ -286,6 +339,9 @@ mod tests {
     }
 
     #[test]
+    // SAFETY: `i` ranges over 0..CNODE_CAPACITY (64), which always fits the
+    // u32 object id — the `as` narrowing is purely nominal in the test.
+    #[allow(clippy::cast_possible_truncation)]
     fn cnode_fills_up_cleanly() {
         let mut c = CNode::new();
         for i in 0..CNODE_CAPACITY {
@@ -365,6 +421,9 @@ mod tests {
     }
 
     #[test]
+    // SAFETY: `CNODE_CAPACITY` (64) fits in `Slot` (u16); the point of the
+    // test is that index 64 is out of bounds of the 64-entry array.
+    #[allow(clippy::cast_possible_truncation)]
     fn out_of_bounds_slot_is_err() {
         let mut c = CNode::new();
         let bad = CNODE_CAPACITY as Slot;

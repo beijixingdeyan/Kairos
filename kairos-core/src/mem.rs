@@ -59,6 +59,10 @@ impl<'a> BitmapAllocator<'a> {
     /// `bits` must cover at least `total` bits; all bits must start 0 (free).
     /// The kernel reserves the boot image & tables by calling [`reserve`]
     /// afterwards.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `bits` is too small to cover `total` frames.
     pub fn new(bits: &'a mut [u8], base: FrameIdx, total: usize) -> Self {
         assert!(
             bits.len().saturating_mul(8) >= total,
@@ -80,6 +84,10 @@ impl<'a> BitmapAllocator<'a> {
     /// frees exactly the firmware-usable runs afterwards with
     /// [`clear_range`]. The free counter starts at 0, so it stays consistent
     /// with the bits.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `bits` is too small to cover `total` frames.
     pub fn new_all_used(bits: &'a mut [u8], base: FrameIdx, total: usize) -> Self {
         assert!(
             bits.len().saturating_mul(8) >= total,
@@ -95,18 +103,22 @@ impl<'a> BitmapAllocator<'a> {
         }
     }
 
+    #[must_use]
     pub const fn base(&self) -> FrameIdx {
         self.base
     }
 
+    #[must_use]
     pub const fn total(&self) -> usize {
         self.total
     }
 
+    #[must_use]
     pub const fn free_count(&self) -> usize {
         self.free
     }
 
+    #[must_use]
     pub fn used_count(&self) -> usize {
         self.total - self.free
     }
@@ -180,11 +192,27 @@ impl<'a> BitmapAllocator<'a> {
     }
 
     /// Release a previously allocated single frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AllocError::OutOfRange`] when `idx` lies outside the managed
+    /// window and [`AllocError::NotAllocated`] when the frame is currently
+    /// free.
     pub fn free(&mut self, idx: FrameIdx) -> Result<(), AllocError> {
         self.free_range(idx, 1)
     }
 
     /// Release a contiguous run of `n` frames starting at `idx`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AllocError::OutOfRange`] when the run extends outside the
+    /// managed window and [`AllocError::NotAllocated`] when any frame in the
+    /// run is currently free.
+    // SAFETY: the bounds check above guarantees `idx - base < total`, and
+    // `total` is a `usize`, so the `as` narrowing can never lose bits on the
+    // supported 64-bit targets.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn free_range(&mut self, idx: FrameIdx, n: usize) -> Result<(), AllocError> {
         if idx < self.base || idx + n as u64 > self.base + self.total as u64 {
             return Err(AllocError::OutOfRange);
@@ -203,6 +231,16 @@ impl<'a> BitmapAllocator<'a> {
     }
 
     /// Mark `n` frames starting at `idx` as used (boot reservation).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AllocError::OutOfRange`] when the run extends outside the
+    /// managed window and [`AllocError::NotAllocated`] when any frame in the
+    /// run is already in use.
+    // SAFETY: the bounds check above guarantees `idx - base < total`, and
+    // `total` is a `usize`, so the `as` narrowing can never lose bits on the
+    // supported 64-bit targets.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn reserve(&mut self, idx: FrameIdx, n: usize) -> Result<(), AllocError> {
         if idx < self.base || idx + n as u64 > self.base + self.total as u64 {
             return Err(AllocError::OutOfRange);
@@ -223,6 +261,10 @@ impl<'a> BitmapAllocator<'a> {
     /// Clear `n` bits starting at `idx` regardless of their current value,
     /// adjusting the free counter. Used when building the initial map from
     /// the firmware (a range may already be clear if two regions overlap).
+    // SAFETY: the bounds check above guarantees `idx - base < total`, and
+    // `total` is a `usize`, so the `as` narrowing can never lose bits on the
+    // supported 64-bit targets.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn clear_range(&mut self, idx: FrameIdx, n: usize) {
         if idx < self.base || idx + n as u64 > self.base + self.total as u64 {
             return;
@@ -238,6 +280,7 @@ impl<'a> BitmapAllocator<'a> {
 
     /// Slow invariant check used by tests and fuzzing: recount unset bits and
     /// compare with `free_count`.
+    #[must_use]
     pub fn check_invariants(&self) -> bool {
         let mut unset = 0usize;
         for i in 0..self.total {
@@ -253,7 +296,7 @@ impl<'a> BitmapAllocator<'a> {
 mod tests {
     use super::*;
 
-    fn make<'b>(bits: &'b mut [u8], base: FrameIdx, total: usize) -> BitmapAllocator<'b> {
+    fn make(bits: &mut [u8], base: FrameIdx, total: usize) -> BitmapAllocator<'_> {
         for b in bits.iter_mut() {
             *b = 0;
         }
@@ -261,6 +304,9 @@ mod tests {
     }
 
     #[test]
+    // SAFETY: `i` is non-negative (range 0..256), so the i32→u64 `as`
+    // widening never loses a sign.
+    #[allow(clippy::cast_sign_loss)]
     fn alloc_full_window_then_exhaust() {
         let mut bits = [0u8; 32]; // 256 frames
         let mut a = make(&mut bits, 0x1000, 256);
@@ -309,6 +355,9 @@ mod tests {
     }
 
     #[test]
+    // SAFETY: `i` is non-negative (range 0..8), so the i32→u64 `as` widening
+    // never loses a sign.
+    #[allow(clippy::cast_sign_loss)]
     fn contiguous_range_allocation() {
         let mut bits = [0u8; 8];
         let mut a = make(&mut bits, 0, 64);
@@ -360,8 +409,8 @@ mod tests {
         let mut bits = [0u8; 64];
         let mut a = make(&mut bits, 0x400_000, 512);
         let mut allocs = [0u64; 16];
-        for i in 0..16 {
-            allocs[i] = a.alloc().unwrap();
+        for slot in &mut allocs {
+            *slot = a.alloc().unwrap();
         }
         for i in (0..16).step_by(2) {
             a.free(allocs[i]).unwrap();

@@ -48,6 +48,7 @@ pub struct Message {
 }
 
 impl Message {
+    #[must_use]
     pub const fn data(tag: u16, words: [Word; MSG_WORDS]) -> Self {
         Self {
             tag,
@@ -56,6 +57,7 @@ impl Message {
         }
     }
 
+    #[must_use]
     pub const fn capability(tag: u16, object: u32, rights_byte: u8) -> Self {
         let mut words = [0; MSG_WORDS];
         words[1] = object as Word;
@@ -67,6 +69,7 @@ impl Message {
         }
     }
 
+    #[must_use]
     pub const fn payload(&self) -> &[Word; MSG_WORDS] {
         &self.words
     }
@@ -107,6 +110,7 @@ impl Default for ChannelCore {
 }
 
 impl ChannelCore {
+    #[must_use]
     pub const fn new() -> Self {
         Self {
             buf: [Message::data(0, [0; MSG_WORDS]); CHANNEL_CAPACITY],
@@ -115,19 +119,27 @@ impl ChannelCore {
         }
     }
 
+    #[must_use]
     pub const fn len(&self) -> usize {
         self.count
     }
 
+    #[must_use]
     pub const fn is_empty(&self) -> bool {
         self.count == 0
     }
 
+    #[must_use]
     pub const fn is_full(&self) -> bool {
         self.count == CHANNEL_CAPACITY
     }
 
     /// Push a message. `Err(Full)` when the channel is full.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ChannelError::Full`] when the channel already holds
+    /// [`CHANNEL_CAPACITY`] messages.
     pub fn push(&mut self, msg: Message) -> Result<(), ChannelError> {
         if self.is_full() {
             return Err(ChannelError::Full);
@@ -150,6 +162,7 @@ impl ChannelCore {
     }
 
     /// Peek the oldest message without consuming it.
+    #[must_use]
     pub fn peek(&self) -> Option<&Message> {
         if self.is_empty() {
             return None;
@@ -200,10 +213,15 @@ impl fmt::Display for ChannelError {
 /// Validate a capability transfer request: the target object kind must match
 /// what the message says it carries. Pure validation logic, used by the
 /// kernel before mutating any capability space.
+#[must_use]
 pub fn check_cap_transfer(msg: &Message, kind: ObjectKind) -> bool {
     if msg.kind != MsgKind::CapTransfer {
         return false;
     }
+    // SAFETY (of the "truncation"): the CapTransfer ABI deliberately stores
+    // the 32-bit object id in a 64-bit word, so decoding with `as u32` is the
+    // documented, intentional narrowing.
+    #[allow(clippy::cast_possible_truncation)]
     let object = msg.words[1] as u32;
     // Kinds are small positive ids; object 0 is reserved (invalid).
     object != 0 && matches!(
@@ -237,6 +255,9 @@ mod tests {
     }
 
     #[test]
+    // SAFETY: loop indices are < CHANNEL_CAPACITY (16), values
+    // 100..103 — far below u16::MAX; the `as` narrowing is nominal in tests.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn capacity_enforced() {
         let mut ch = ChannelCore::new();
         for i in 0..CHANNEL_CAPACITY {
@@ -250,6 +271,9 @@ mod tests {
     }
 
     #[test]
+    // SAFETY: loop indices are < CHANNEL_CAPACITY (16), values
+    // 100..103 — far below u16::MAX; the `as` narrowing is nominal in tests.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn wrap_around_keeps_fifo() {
         let mut ch = ChannelCore::new();
         for i in 0..CHANNEL_CAPACITY {
