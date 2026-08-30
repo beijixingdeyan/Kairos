@@ -124,13 +124,19 @@ jobs:
             cargo run -p os
           code=$?
           echo "runner exit: $code"
-          [ $code -ne 124 ] && exit $code
-          echo "TIMED OUT: the in-guest self-tests did not finish; \
-          last guest output above"
+          [ $code -eq 124 ] && { echo "TIMED OUT: the in-guest self-tests \
+          did not finish; last guest output above"; exit 1; }
+          exit $code
 
       - name: Boot without self-tests (shell milestone, 15 s watchdog)
         run: |
-          timeout 15 bash -c 'KAIROS_QEMU=qemu-system-x86_64 cargo run -p os < /dev/null \
+          set +e
+          timeout 15 bash -c 'KAIROS_QEMU=qemu-system-x86_64 cargo run -p os \
+            -d int -D /tmp/kairos-int.log < /dev/null \
             | tee /tmp/kairos-boot.log' || true
+          echo "--- guest output (tail) ---"
+          tail -c 2000 /tmp/kairos-boot.log
+          echo "--- qemu -d int log (tail) ---"
+          tail -c 6000 /tmp/kairos-int.log 2>/dev/null || echo "(no int log)"
           grep -Eq "kairos shell .*type \`help\`" /tmp/kairos-boot.log || \
             { echo "shell banner not seen"; exit 1; }
