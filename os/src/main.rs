@@ -217,7 +217,15 @@ fn main() {
                 std::thread::sleep(std::time::Duration::from_millis(25));
             }
             match conn {
-                Some(s) => Box::new(SocketConsole(s)),
+                Some(s) => {
+                    // A short read timeout on the drain side is essential:
+                    // without it the drain thread parks in `read` while
+                    // holding the console mutex, starving the stdin-forward
+                    // thread exactly when the guest is idle waiting for
+                    // input (the shell would never see any command).
+                    let _ = s.set_read_timeout(Some(std::time::Duration::from_millis(50)));
+                    Box::new(SocketConsole(s))
+                }
                 None => {
                     eprintln!("error: could not connect to QEMU serial console");
                     let _ = child.kill();
@@ -247,7 +255,17 @@ fn main() {
                 let mut c = drain_console.lock().unwrap();
                 let n = c.read(&mut buf);
                 match n {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) => break,
+                    // Read timeouts are the drain's liveness heartbeat: they
+                    // release the mutex so the stdin-forward thread can write
+                    // (see the console setup above).
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        continue
+                    }
+                    Err(_) => break,
                     Ok(n) => n,
                 }
             };

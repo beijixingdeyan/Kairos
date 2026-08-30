@@ -180,13 +180,25 @@ SeaBIOS (QEMU)
 | 范围 | 内容 |
 | --- | --- |
 | `0x10_0000_0000`（USER_BASE） | 用户程序映像（text/rodata/data/bss，ELF 装载） |
+| `0x10_0100_0000` | `echo_server`（每程序间隔 16 MiB） |
+| `0x10_0200_0000` | `echo_client` |
+| `0x10_0300_0000` | `counter` |
+| `0x10_0400_0000` | `deadline` |
 | `0x11_0000_0000`~`0x11_0040_0000` | 用户栈（4 MiB，向下增长） |
 | `0x12_0000_0000`~`0x12_0800_0000` | 零拷贝共享帧窗口（128 MiB） |
 | `0x40_0000_0000_0000` | 内核堆（2^46，Linked List Allocator） |
 | `0x80_0000_0000_0000` | 物理内存偏移映射（2^47，bootloader 提供） |
 
-用户程序以 `-Ttext=0x100000000` 静态链接，无重定位、无动态加载——教学上
-刻意剔除链接器魔法，ELF 解析只保留 `PT_LOAD` 段。
+内核镜像由 bootloader 以 `virtual_address_offset=0x1_0000_0000_00`（1 TiB）
+装入，内核符号的运行地址 = ELF VMA + 1 TiB；用户程序则链接在各自独立的
+64 GiB 基址上，与内核互不重叠。
+
+用户程序以 `-Ttext=0x10_0000_0000`（每程序 +16 MiB）静态链接，保持“无
+动态链接”的朴素模型；但 Rust 代码gen 会在 `.rela.dyn` 中发出少量
+`R_X86_64_RELATIVE` GOT 重定位（函数指针/动态符号槽），装载器因此分三
+步完成装载：**全部段以可写方式映射并拷贝映像 → 应用 `.rela.dyn` 重定位
+（把 addend 写入槽位）→ 对纯文本段撤销 `WRITABLE`（W^X）**。ELF 解析只
+使用 `PT_LOAD` 段 + 节表（仅 SHT_RELA）。
 
 ### 4.3 内存管理
 
@@ -282,12 +294,16 @@ _start(arg)`：
 - `counter`：每 500 ms 打印计数；
 - `deadline`：按 pid 奇偶取 period/budget，展示 EDF 周期行为。
 
-`kernel/build.rs` 嵌套构建 user 目标（`RUSTFLAGS="-Clink-arg=-Ttext=0x100000000"`，
-注意不可含空格），并把二进制以绝对路径注入 `include_bytes!`。
+`kernel/build.rs` 嵌套构建 user 目标，按程序设置各自的
+`-Ttext`（`0x10_0000_0000` 起、每程序 +16 MiB）；嵌套 cargo 必须**同时**
+设置 `RUSTFLAGS` 与换行编码的 `CARGO_ENCODED_RUSTFLAGS`
+（如 `-Clink-arg=-Ttext=0x10_0000_0000\n`）——现代 cargo 在父 cargo 导出
+编码变量时忽略裸 `RUSTFLAGS`，漏设会导致 `-Ttext` 静默失效、改用原始
+VMA 链接。二进制路径以绝对路径注入 `include_bytes!`。
 
 ### 4.10 测试体系（三层）
 
-1. 主机单元测试：`cargo test -p kairos-core`（41 例）。
+1. 主机单元测试：`cargo test -p kairos-core`（42 例）。
 2. 属性测试：`cargo test -p fuzz --release`（proptest：调度器 vs 步进模型、
    通道 vs `VecDeque`、分配器 vs 不相交集合；固定种子确定性复现）。
 3. QEMU 集成：`KAIROS_TEST=1 cargo run -p os`（guest 退出码 0x10/0x11）。

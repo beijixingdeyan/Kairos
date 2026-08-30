@@ -55,6 +55,11 @@ pub static BOOTLOADER_CONFIG: bootloader_api::BootloaderConfig = {
 /// Kernel entry point. Never returns.
 #[allow(unreachable_code)] // trailing idle loop guards `shell::start() -> !`
 fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
+    // Interrupts off at entry: the firmware/bootloader may leave IF set, and
+    // a timer IRQ landing mid-init (IDT/GS bases half-written) wedges the
+    // boot nondeterministically. Re-enabled after all CPU state is set up.
+    x86_64::instructions::interrupts::disable();
+
     // 1. The serial console is the very first hardware we touch: everything
     //    after this point can log.
     serial::init();

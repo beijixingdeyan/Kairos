@@ -39,11 +39,20 @@ impl fmt::Display for AllocError {
 }
 
 /// Bitmap frame allocator over a caller-provided bitmap.
+///
+/// Allocation policy: *next-fit with first-fit fallback*. A scan hint keeps
+/// the previous allocation's end as the next scan start, so sequential
+/// allocators (kernel heap, user image loading) resolve in O(1) per frame
+/// instead of rescanning the whole bitmap. When no run is reachable from the
+/// hint without straddling the array wrap, a full linear first-fit scan from
+/// index 0 runs instead, which is always complete. `free`/`reserve`/accounting
+/// are unaffected by the hint.
 pub struct BitmapAllocator<'a> {
     bits: &'a mut [u8],
     base: FrameIdx,
     total: usize,
     free: usize,
+    hint: usize,
 }
 
 impl<'a> BitmapAllocator<'a> {
@@ -62,6 +71,7 @@ impl<'a> BitmapAllocator<'a> {
             base,
             total,
             free,
+            hint: 0,
         }
     }
 
@@ -81,6 +91,7 @@ impl<'a> BitmapAllocator<'a> {
             base,
             total,
             free: 0,
+            hint: 0,
         }
     }
 
@@ -118,15 +129,36 @@ impl<'a> BitmapAllocator<'a> {
         self.alloc_range(1)
     }
 
-    /// Allocate `n` contiguous frames. First fit by scanning word-wise.
+    /// Allocate `n` contiguous frames. Next fit from the scan hint, falling
+    /// back to a full linear first-fit scan when the hint cannot reach a
+    /// suitable run (a run straddling the array wrap). `None` if exhausted.
     pub fn alloc_range(&mut self, n: usize) -> Option<FrameIdx> {
         if n == 0 || n > self.free {
             return None;
         }
+        // Fast path: resume where the previous allocation stopped. The wrap
+        // scan can split a run whose free frames straddle `hint`, so a miss
+        // does not mean exhaustion.
+        self.scan_from(self.hint, n)
+            // Exact fallback: a full linear scan from 0 is always complete
+            // and restores first-fit behaviour for fragmented maps.
+            .or_else(|| self.scan_from(0, n))
+    }
+
+    /// Scan `n`-frame runs, visiting indices `[start..total) ∪ [0..start)` in
+    /// order. Runs never straddle the array wrap (the counter resets at the
+    /// wrap), so allocations stay inside bounds.
+    fn scan_from(&mut self, start: usize, n: usize) -> Option<FrameIdx> {
         let total = self.total;
         let mut run = 0usize;
         let mut run_start = 0usize;
-        for i in 0..total {
+        let mut prev = usize::MAX;
+        for step in 0..total {
+            let i = (start + step) % total;
+            if prev != usize::MAX && i < prev {
+                run = 0; // wrapped around: restart the run counter
+            }
+            prev = i;
             if self.bit(i) {
                 run = 0;
                 continue;
@@ -140,6 +172,7 @@ impl<'a> BitmapAllocator<'a> {
                     self.set_bit(j, true);
                 }
                 self.free -= n;
+                self.hint = (run_start + n) % total;
                 return Some(self.base + run_start as u64);
             }
         }
@@ -240,15 +273,21 @@ mod tests {
     }
 
     #[test]
-    fn free_then_realloc() {
+    fn free_then_realloc_next_fit() {
         let mut bits = [0u8; 8];
         let mut a = make(&mut bits, 0, 64);
-        let f0 = a.alloc().unwrap();
-        let f1 = a.alloc().unwrap();
+        let f0 = a.alloc().unwrap(); // 0, hint now past it
+        let _f1 = a.alloc().unwrap();
         a.free(f0).unwrap();
-        // First fit returns the lowest freed frame again.
+        // Next fit: the hint already passed f0, so the reuse happens later.
+        assert_ne!(a.alloc(), Some(f0));
+        assert!(a.check_invariants());
+        // Exhausting the rest wraps the hint around and reuses f0.
+        for _ in 0..61 {
+            let _ = a.alloc();
+        }
         assert_eq!(a.alloc(), Some(f0));
-        let _ = f1;
+        assert!(a.check_invariants());
     }
 
     #[test]

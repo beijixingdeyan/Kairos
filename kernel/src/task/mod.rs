@@ -363,12 +363,23 @@ pub fn syscall_park(
 }
 
 /// Kernel tasks (e.g. the shell) yield voluntarily: set a flag the next
-/// timer tick honours, then sleep until that tick.
+/// timer tick honours, then sleep until that tick. The tick handler rotates
+/// the task to the back of the ready queue *and clears the flag*, so the
+/// loop returns and the caller may re-poll its input (the shell's console).
 static KERNEL_YIELD: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 pub fn kernel_yield() {
     KERNEL_YIELD.store(true, core::sync::atomic::Ordering::SeqCst);
     loop {
+        // Re-check with interrupts off so the flag cannot be consumed and
+        // re-set in the window between the load and the HLT (which would
+        // sleep forever). Once a tick has rotated us back, return so the
+        // caller (e.g. the shell) can re-poll its input.
+        x86_64::instructions::interrupts::disable();
+        if !KERNEL_YIELD.load(core::sync::atomic::Ordering::SeqCst) {
+            x86_64::instructions::interrupts::enable();
+            return;
+        }
         x86_64::instructions::interrupts::enable_and_hlt();
     }
 }

@@ -109,12 +109,18 @@ recv 任务：pop 一条 → send_waiters.pop() → wake_parked(w)
 ## 4. 地址空间（单页表）
 
 ```
-0x10_0000_0000  USER_BASE（程序映像）
+0x10_0000_0000  USER_BASE（hello；每程序 +16 MiB：echo_server=0x10_0100_0000 …）
 0x11_0000_0000  USER_STACK_BASE（4 MiB）
 0x12_0000_0000  USER_FRAME_WINDOW（128 MiB 共享帧）
 0x40_0000_0000_0000  内核堆
 0x80_0000_0000_0000  物理内存偏移（bootloader）
 ```
+
+内核镜像由 bootloader 以 1 TiB 偏移装入（运行时地址 = ELF VMA +
+`0x1_0000_0000_00`），与用户程序的 64 GiB 区域互不重叠。用户 ELF 装载分
+三步：映射（可写）→ 应用 `.rela.dyn` 的 `R_X86_64_RELATIVE` 槽位 → 对
+纯文本段撤销 `WRITABLE`（W^X）；`syscall` 指令依赖 `EFER.SCE`（syscall
+初始化时设置）与 GS 内核栈区。
 
 ## 5. 编译期配置（kairos-core/build.rs）
 
