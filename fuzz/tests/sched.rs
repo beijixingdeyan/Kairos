@@ -58,10 +58,6 @@ proptest! {
                     assert_ne!(rec.state, kairos_core::sched::TaskState::Blocked,
                         "runner must not be blocked");
                 }
-                // Invariant 2: stats are monotone (non-negative counters).
-                for rec in s.iter() {
-                    assert!(rec.stats.total_ticks >= 0);
-                }
             }
         }
     }

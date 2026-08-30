@@ -43,15 +43,12 @@ proptest! {
                 }
                 Op::AllocRange(n) => {
                     let n = usize::from(n.max(1));
-                    match alloc.alloc_range(n) {
-                        Some(base) => {
-                            for i in 0..n {
-                                let f = base + i as u64;
-                                assert!(!held.contains(&f));
-                                held.push(f);
-                            }
+                    if let Some(base) = alloc.alloc_range(n) {
+                        for i in 0..n {
+                            let f = base + i as u64;
+                            assert!(!held.contains(&f));
+                            held.push(f);
                         }
-                        None => {}
                     }
                 }
                 Op::Free(f) => {

@@ -79,7 +79,10 @@ mod tests {
 
     #[test]
     fn heap_size_is_sane() {
-        assert!(HEAP_SIZE >= 4 * 1024 * 1024);
+        // Compile-time check: HEAP_SIZE is a build-time constant, so clippy
+        // asks for the assertion to run at compile time rather than at test
+        // runtime (the tested predicate does not depend on dynamic state).
+        const { assert!(HEAP_SIZE >= 4 * 1024 * 1024); }
     }
 
     #[test]
