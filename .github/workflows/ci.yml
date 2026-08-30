@@ -120,28 +120,30 @@ jobs:
         # guest output (a wedged boot shows exactly where it stopped).
         run: |
           set +e
-          KAIROS_TEST=1 KAIROS_QEMU=qemu-system-x86_64 timeout 600 \
-            cargo run -p os -- -d int -D /tmp/kairos-int-test.log
+          KAIROS_TEST=1 KAIROS_QEMU=qemu-system-x86_64 timeout 300 \
+            cargo run -p os -- -icount shift=auto -d int -D /tmp/kairos-int-test.log
           code=$?
           echo "runner exit: $code"
-          echo "--- qemu -d int log (tail) ---"
-          tail -c 6000 /tmp/kairos-int-test.log 2>/dev/null || echo "(no int log)"
+          echo "--- qemu -d int log (head 40K) ---"
+          head -c 40000 /tmp/kairos-int-test.log 2>/dev/null || echo "(no int log)"
+          echo "--- qemu -d int log (tail 8K) ---"
+          tail -c 8000 /tmp/kairos-int-test.log 2>/dev/null || echo "(no int log)"
           [ $code -eq 124 ] && { echo "TIMED OUT: the in-guest self-tests \
           did not finish; last guest output above"; exit 1; }
           exit $code
 
-      - name: Boot without self-tests (shell milestone, 60 s watchdog)
+      - name: Boot without self-tests (shell milestone, 45 s watchdog)
         if: always()
         run: |
           set +e
-          timeout 60 bash -c 'KAIROS_QEMU=qemu-system-x86_64 cargo run -p os -- \
-            -d int -D /tmp/kairos-int.log < /dev/null \
+          timeout 45 bash -c 'KAIROS_QEMU=qemu-system-x86_64 cargo run -p os -- \
+            -icount shift=auto -d int -D /tmp/kairos-int.log < /dev/null \
             | tee /tmp/kairos-boot.log' || true
           echo "--- guest output (tail) ---"
-          tail -c 2000 /tmp/kairos-boot.log
-          echo "--- qemu -d int log (head) ---"
-          head -c 2500 /tmp/kairos-int.log 2>/dev/null || echo "(no int log)"
-          echo "--- qemu -d int log (tail) ---"
+          tail -c 3000 /tmp/kairos-boot.log
+          echo "--- qemu -d int log (head 40K) ---"
+          head -c 40000 /tmp/kairos-int.log 2>/dev/null || echo "(no int log)"
+          echo "--- qemu -d int log (tail 4K) ---"
           tail -c 4000 /tmp/kairos-int.log 2>/dev/null || echo "(no int log)"
           grep -Eq "kairos shell .*type \`help\`" /tmp/kairos-boot.log || \
             { echo "shell banner not seen"; exit 1; }
