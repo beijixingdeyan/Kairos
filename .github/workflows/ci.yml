@@ -128,7 +128,7 @@ jobs:
             wget -q https://download.qemu.org/qemu-9.2.0.tar.xz -O /tmp/qemu.tar.xz
             tar -xf /tmp/qemu.tar.xz -C /tmp
             cd /tmp/qemu-9.2.0
-            ./configure --target-list=x86_64-softmmu --prefix=/opt/kairos-qemu \
+            CFLAGS="-fPIE" ./configure --target-list=x86_64-softmmu --prefix=/opt/kairos-qemu \
               --disable-docs --disable-pie
             make -j"$(nproc)"
             sudo make install
