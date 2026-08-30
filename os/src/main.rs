@@ -7,11 +7,13 @@
 //! * anything else (crash/abort)  → runner exit 2
 //!
 //! The guest serial console is wired to a side channel instead of plain
-//! `-serial stdio`: QEMU's stdio backend buffers through C stdio (lines can
-//! vanish when the VM is killed), and it does not reliably forward piped
-//! (non-console) input. The runner wires QEMU to a loopback TCP socket
-//! (`wait=on`, zero bytes lost on any host), pumps guest console output to
+//! `-serial stdio`: QEMU's stdio backend does not reliably forward piped
+//! (non-console) input on Windows. The runner pumps guest console output to
 //! its stdout and forwards its stdin into the guest.
+//!
+//! * Windows: a named pipe (`-serial pipe:kairos-console`), the native way
+//!   to hand a console through the QEMU process boundary.
+//! * Other OSes: plain stdio inheritance (works for pipes and TTYs alike).
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -22,20 +24,45 @@ const IMAGE: &str = env!("KAIROS_BIOS_IMAGE");
 /// A console channel: readable from the guest UART, writable into it.
 trait Console: Read + Write + Send {}
 
-/// A TCP-wired console. QEMU is the socket server (`-serial
-/// tcp:127.0.0.1:<port>,server=on,wait=on`): the VM does not start until we
-/// connect, so no console bytes are ever lost, and - unlike `-serial
-/// stdio` piped through QEMU's C stdio (block-buffered) - the guest output
-/// streams straight into this socket and is flushed per line by the drain.
-/// Used on every host for identical lossless behaviour.
+#[cfg(windows)]
+const CONSOLE_PIPE: &str = r"\\.\pipe\kairos-console";
+
+/// A console that reads from stdin and writes to stdout (non-Windows).
+#[cfg(not(windows))]
+struct StdioConsole;
+
+#[cfg(not(windows))]
+impl Read for StdioConsole {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        std::io::stdin().read(buf)
+    }
+}
+
+#[cfg(not(windows))]
+impl Write for StdioConsole {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        std::io::stdout().write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        std::io::stdout().flush()
+    }
+}
+
+#[cfg(not(windows))]
+impl Console for StdioConsole {}
+
+/// A TCP-wired console (Windows: QEMU is the socket server).
+#[cfg(windows)]
 struct SocketConsole(std::net::TcpStream);
 
+#[cfg(windows)]
 impl Read for SocketConsole {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         self.0.read(buf)
     }
 }
 
+#[cfg(windows)]
 impl Write for SocketConsole {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.0.write(buf)
@@ -45,7 +72,58 @@ impl Write for SocketConsole {
     }
 }
 
+#[cfg(windows)]
 impl Console for SocketConsole {}
+
+/// Open the guest console side channel.
+#[cfg(windows)]
+fn open_console() -> std::io::Result<Box<dyn Console>> {
+    use std::fs::OpenOptions;
+    // Wait for QEMU to create the pipe server (it does so at startup).
+    for _ in 0..200 {
+        match OpenOptions::new().read(true).write(true).open(CONSOLE_PIPE) {
+            Ok(f) => {
+                let boxed: Box<dyn Console> = Box::new(PipeConsole(f));
+                return Ok(boxed);
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(25)),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        format!("named pipe {CONSOLE_PIPE} never appeared"),
+    ))
+}
+
+/// A Windows named pipe endpoint (QEMU is the pipe server).
+#[cfg(windows)]
+struct PipeConsole(std::fs::File);
+
+#[cfg(windows)]
+impl Read for PipeConsole {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+#[cfg(windows)]
+impl Write for PipeConsole {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
+#[cfg(windows)]
+impl Console for PipeConsole {}
+
+#[cfg(not(windows))]
+fn open_console() -> std::io::Result<Box<dyn Console>> {
+    let boxed: Box<dyn Console> = Box::new(StdioConsole);
+    Ok(boxed)
+}
 
 fn main() {
     // Windows host timers default to a ~15.6 ms quantum. Raising this
@@ -77,18 +155,45 @@ fn main() {
     // Extra command lines (e.g. `cargo run -p os -- -d int`) pass through.
     let extra: Vec<String> = std::env::args().skip(1).collect();
 
-    // QEMU listens on a loopback socket (wait=on: the VM does not start
-    // until we connect, so no console bytes are ever lost). The port is
-    // picked by binding ephemeral then freeing it for QEMU.
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("no free loopback port")
-        .local_addr()
-        .expect("no local addr")
-        .port();
-    let serial_arg = format!("tcp:127.0.0.1:{port},server=on,wait=on");
-    let console_port = Some(port);
+    let serial_arg: String = if cfg!(windows) {
+        // Windows: QEMU listens on a loopback socket (wait=on: the VM does
+        // not start until we connect, so no console bytes are ever lost).
+        // The port is picked by binding ephemeral then freeing it for QEMU.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("no free loopback port")
+            .local_addr()
+            .expect("no local addr")
+            .port();
+        format!("tcp:127.0.0.1:{port},server=on,wait=on")
+    } else {
+        // Other OSes: plain stdio inheritance (works with pipes and TTYs).
+        "stdio".to_string()
+    };
+    let console_port: Option<u16> = {
+        if cfg!(windows) {
+            Some(
+                serial_arg
+                    .trim_start_matches("tcp:127.0.0.1:")
+                    .split(',')
+                    .next()
+                    .unwrap()
+                    .parse()
+                    .unwrap(),
+            )
+        } else {
+            None
+        }
+    };
 
     let mut cmd = Command::new(&qemu);
+    #[cfg(unix)]
+    {
+        // stdio-serial output pipelines through QEMU's block-buffered C
+        // stdio: when the VM is killed (CI watchdogs) buffered lines are
+        // lost. Line-buffer QEMU's stdout so each guest line flushes.
+        cmd = Command::new("stdbuf");
+        cmd.arg("-oL").arg(&qemu);
+    }
     cmd.args([
         "-drive",
         &format!("format=raw,file={IMAGE}"),
@@ -112,8 +217,11 @@ fn main() {
     // stable; see docs/ARCHITECTURE.md "Timing and emulation" for the
     // trade-offs and how to pass `-icount shift=auto` for wall-accurate
     // timing when emphasizing responsiveness over robustness.
-    // The console travels over the socket, so QEMU's own stdio is unused.
-    cmd.stdin(Stdio::null()).stdout(Stdio::null());
+    // On Windows the console travels over the socket; otherwise QEMU
+    // inherits our stdio directly and must not be double-wired.
+    if cfg!(windows) {
+        cmd.stdin(Stdio::null()).stdout(Stdio::null());
+    }
     cmd.stderr(Stdio::inherit());
 
     eprintln!(
@@ -127,7 +235,11 @@ fn main() {
         std::process::exit(2);
     };
 
-    // Connect to QEMU's listener (it waits for us before starting the VM).
+    // Windows: connect to QEMU's listener (it waits for us before starting
+    // the VM). Other OSes: the console is our own stdio — `console_port` is
+    // always `None` there, and `SocketConsole` is compiled out, so the
+    // whole socket path is Windows-only.
+    #[cfg(windows)]
     let console: Box<dyn Console> = match console_port {
         Some(port) => {
             let mut conn = None;
@@ -165,11 +277,20 @@ fn main() {
                 }
             }
         }
-        None => {
-            eprintln!("error: no console port configured");
+        None => open_console().unwrap_or_else(|e| {
+            eprintln!("error: could not open the guest console channel: {e}");
+            let _ = child.kill();
+            let _ = child.wait();
             std::process::exit(2);
-        }
+        }),
     };
+    #[cfg(not(windows))]
+    let console: Box<dyn Console> = open_console().unwrap_or_else(|e| {
+        eprintln!("error: could not open the guest console channel: {e}");
+        let _ = child.kill();
+        let _ = child.wait();
+        std::process::exit(2);
+    });
 
     // Two threads share the console: one drains guest output to our stdout,
     // the other forwards our stdin into the guest.
