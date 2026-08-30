@@ -1,4 +1,4 @@
-﻿name: CI
+name: CI
 
 on:
   push:
@@ -148,14 +148,17 @@ jobs:
         run: |
           set +e
           KAIROS_TEST=1 KAIROS_QEMU=/opt/kairos-qemu/bin/qemu-system-x86_64 \
-            timeout 300 cargo run -p os -- -machine pc,smm=off,acpi=off -d int -D /tmp/kairos-int-test.log
+            timeout 300 cargo run -p os -- -d int -D /tmp/kairos-int-test.log
           code=$?
           echo "runner exit: $code"
           echo "--- int log structure ---"
           if [ -f /tmp/kairos-int-test.log ]; then
             echo "bytes: $(stat -c %s /tmp/kairos-int-test.log) lines: $(wc -l < /tmp/kairos-int-test.log)"
-            echo "--- head 6 ---"; head -6 /tmp/kairos-int-test.log | cut -c1-90
-            echo "--- tail 6 ---"; tail -6 /tmp/kairos-int-test.log | cut -c1-90
+            echo "smm: $(grep -c 'SMM: enter' /tmp/kairos-int-test.log)"
+            echo "exceptions: $(grep -cE 'check_exception|injected' /tmp/kairos-int-test.log)"
+            echo "--- head 10 ---"; head -10 /tmp/kairos-int-test.log | cut -c1-80
+            echo "--- mid 4 ---"; sed -n "$(( $(wc -l < /tmp/kairos-int-test.log) / 2 )),+3p" /tmp/kairos-int-test.log | cut -c1-80
+            echo "--- tail 4 ---"; tail -4 /tmp/kairos-int-test.log | cut -c1-80
             echo "flood lines: $(grep -c 'INT=0x08' /tmp/kairos-int-test.log)"
           else
             echo "(no int log)"
@@ -164,22 +167,22 @@ jobs:
           did not finish; last guest output above"; exit 1; }
           exit $code
 
-      - name: Boot without self-tests (shell milestone, KVM, 90 s watchdog)
+      - name: Upload the guest interrupt trace for offline analysis
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kairos-int-trace
+          path: /tmp/kairos-int-test.log
+          if-no-files-found: ignore
+
+      - name: Boot without self-tests (shell milestone, MTTCG, 90 s watchdog)
         if: always()
         run: |
           set +e
           timeout 90 bash -c 'KAIROS_QEMU=/opt/kairos-qemu/bin/qemu-system-x86_64 \
-            cargo run -p os -- -machine q35 -d int -D /tmp/kairos-int.log < /dev/null \
+            cargo run -p os -- -accel tcg,thread=multi < /dev/null \
             | tee /tmp/kairos-boot.log' || true
           echo "--- guest output (tail) ---"
           tail -c 3000 /tmp/kairos-boot.log
-          echo "--- int log structure ---"
-          if [ -f /tmp/kairos-int.log ]; then
-            echo "bytes: $(stat -c %s /tmp/kairos-int.log) lines: $(wc -l < /tmp/kairos-int.log)"
-            echo "--- tail 4 ---"; tail -4 /tmp/kairos-int.log | cut -c1-90
-            echo "flood lines: $(grep -c 'INT=0x08' /tmp/kairos-int.log)"
-          else
-            echo "(no int log)"
-          fi
           grep -Eq "kairos shell .*type \`help\`" /tmp/kairos-boot.log || \
             { echo "shell banner not seen"; exit 1; }
