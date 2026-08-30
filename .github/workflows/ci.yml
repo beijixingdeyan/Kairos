@@ -1,4 +1,4 @@
-name: CI
+﻿name: CI
 
 on:
   push:
@@ -121,7 +121,7 @@ jobs:
         run: |
           set +e
           KAIROS_TEST=1 KAIROS_QEMU=qemu-system-x86_64 timeout 300 \
-            cargo run -p os -- -icount shift=auto -d int -D /tmp/kairos-int-test.log
+            cargo run -p os -- -machine pc,smm=off -icount shift=auto -d int -D /tmp/kairos-int-test.log
           code=$?
           echo "runner exit: $code"
           echo "--- qemu -d int log (head 40K) ---"
@@ -137,7 +137,7 @@ jobs:
         run: |
           set +e
           timeout 45 bash -c 'KAIROS_QEMU=qemu-system-x86_64 cargo run -p os -- \
-            -icount shift=auto -d int -D /tmp/kairos-int.log < /dev/null \
+            -machine pc,smm=off -icount shift=auto -d int -D /tmp/kairos-int.log < /dev/null \
             | tee /tmp/kairos-boot.log' || true
           echo "--- guest output (tail) ---"
           tail -c 3000 /tmp/kairos-boot.log
