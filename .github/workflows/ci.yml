@@ -121,7 +121,7 @@ jobs:
         run: |
           set +e
           KAIROS_TEST=1 KAIROS_QEMU=qemu-system-x86_64 timeout 180 \
-            cargo run -p os -d int -D /tmp/kairos-int-test.log
+            cargo run -p os -- -d int -D /tmp/kairos-int-test.log
           code=$?
           echo "runner exit: $code"
           echo "--- qemu -d int log (tail) ---"
@@ -134,7 +134,7 @@ jobs:
         if: always()
         run: |
           set +e
-          timeout 15 bash -c 'KAIROS_QEMU=qemu-system-x86_64 cargo run -p os \
+          timeout 15 bash -c 'KAIROS_QEMU=qemu-system-x86_64 cargo run -p os -- \
             -d int -D /tmp/kairos-int.log < /dev/null \
             | tee /tmp/kairos-boot.log' || true
           echo "--- guest output (tail) ---"
