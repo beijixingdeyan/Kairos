@@ -113,7 +113,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y qemu-system-x86
 
       - name: Check KVM availability
-        run: ls -l /dev/kvm && echo "KVM available"
+        run: |
+          ls -l /dev/kvm && echo "KVM available"
+          sudo chmod 666 /dev/kvm || true
 
       - name: Build boot image
         run: cargo build -p os
