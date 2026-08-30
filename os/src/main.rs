@@ -228,7 +228,10 @@ fn main() {
     };
 
     // Windows: connect to QEMU's listener (it waits for us before starting
-    // the VM). Other OSes: the console is our own stdio.
+    // the VM). Other OSes: the console is our own stdio — `console_port` is
+    // always `None` there, and `SocketConsole` is compiled out, so the
+    // whole socket path is Windows-only.
+    #[cfg(windows)]
     let console: Box<dyn Console> = match console_port {
         Some(port) => {
             let mut conn = None;
@@ -264,6 +267,13 @@ fn main() {
             std::process::exit(2);
         }),
     };
+    #[cfg(not(windows))]
+    let console: Box<dyn Console> = open_console().unwrap_or_else(|e| {
+        eprintln!("error: could not open the guest console channel: {e}");
+        let _ = child.kill();
+        let _ = child.wait();
+        std::process::exit(2);
+    });
 
     // Two threads share the console: one drains guest output to our stdout,
     // the other forwards our stdin into the guest.
