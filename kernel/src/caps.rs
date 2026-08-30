@@ -47,9 +47,11 @@ pub fn register(obj: KernelObject) -> u32 {
 
 /// Register the spawn authority at boot (after the heap exists).
 pub fn init() {
-    // Id 1 is hard-coded as the spawn authority.
-    let _ = SPAWN_AUTHORITY;
+    // Id 1 is hard-coded as the spawn authority: push it at index 0 and make
+    // the next registered object take id 2 (register() hands out
+    // NEXT_OBJECT before incrementing, so start the counter at 2).
     OBJECTS.lock().push(KernelObject::SpawnAuthority);
+    NEXT_OBJECT.store(SPAWN_AUTHORITY + 1, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Look up an object by id. Returns a safe handle that re-locks the registry

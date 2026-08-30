@@ -3,9 +3,10 @@
 //! The user programs (see `user/`) are regular static ELF binaries linked at
 //! [`USER_BASE`]. `kernel/build.rs` compiles them and the kernel embeds the
 //! bytes with `include_bytes!`. At spawn time [`load_user_program`] parses
-//! the ELF (PT_LOAD segments only —no dynamic linking, no relocations),
-//! maps them into fresh physical frames with `USER` page flags and returns
-//! the entry point.
+//! the ELF (PT_LOAD segments, plus `.rela.dyn` for the few
+//! `R_X86_64_RELATIVE` GOT entries Rust emits), maps fresh physical frames
+//! with `USER` page flags, applies the relocations and returns the entry
+//! point.
 //!
 //! Address space layout (shared, single-page-table kernel):
 //! ```text
@@ -25,6 +26,13 @@
 //! The user programs (see `user/`) are static ELF binaries, each linked at
 //! its own base (kernel/build.rs passes the per-bin `-Ttext`); the loader
 //! maps them on demand and reuses already-mapped regions.
+//!
+//! *Why relocations:* Rust's codegen emits `R_X86_64_RELATIVE` entries in
+//! `.rela.dyn` (GOT slots for functions/pointers referenced through the PLT
+//! or `dynsym`). A static `no-pie` executable links them to their final
+//! address in the *addend*, so the loader simply writes the addend into the
+//! slot. Skipping this left the slots at 0 and user code jumped to address
+//! zero (observed as `#PF` at `rip=0` right after a syscall return).
 
 use core::sync::atomic::AtomicU64;
 
@@ -121,9 +129,16 @@ fn load_segments(b: &[u8]) -> Option<(u64, alloc::vec::Vec<Seg>)> {
     Some((entry, segs))
 }
 
-/// Map frames for one segment (writable during image copy), copy the image,
-/// zero the tail, then tighten the flags (drop WRITABLE for pure text).
-fn install_segment(seg: &Seg, elf: &[u8]) -> Result<(), ()> {
+/// Phase 1: map the segment's frames (writable — image copy happens here),
+/// copy the file image and zero the tail. Final protections are applied in
+/// [`tighten_segments`] after relocations have been patched.
+fn map_segment(seg: &Seg, elf: &[u8]) -> Result<(), ()> {
+    // The first LOAD of every bare-metal ELF is the ELF-header page at
+    // vaddr 0 (file bytes before the linked text); it carries nothing the
+    // program references at runtime and must not be mapped.
+    if seg.vaddr == 0 || seg.memsz == 0 {
+        return Ok(());
+    }
     let start = VirtAddr::new(seg.vaddr);
     let end = seg.vaddr + seg.memsz;
     let first = Page::<Size4KiB>::containing_address(start).start_address();
@@ -132,13 +147,11 @@ fn install_segment(seg: &Seg, elf: &[u8]) -> Result<(), ()> {
         return Ok(());
     }
 
+    // Writable for the image copy; NX set for non-executable segments.
     let copy_flags = {
-        let mut f = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
-        if seg.writable {
-            f |= PageTableFlags::WRITABLE;
-        } else {
-            f |= PageTableFlags::WRITABLE; // needed while copying the image
-        }
+        let mut f = PageTableFlags::PRESENT
+            | PageTableFlags::USER_ACCESSIBLE
+            | PageTableFlags::WRITABLE;
         if !seg.executable {
             f |= PageTableFlags::NO_EXECUTE;
         }
@@ -175,10 +188,21 @@ fn install_segment(seg: &Seg, elf: &[u8]) -> Result<(), ()> {
             core::ptr::write_bytes(dst, 0, (seg.memsz - seg.filesz) as usize);
         }
     }
+    Ok(())
+}
 
-    // Tighten protections on pure-execute segments (R+X, non-writable).
-    if seg.executable && !seg.writable {
-        let final_flags = {
+/// Phase 3: drop WRITABLE from pure text (R+X) segments after all
+/// relocations have been applied.
+fn tighten_segments(segs: &[Seg]) -> Result<(), ()> {
+    for seg in segs {
+        if seg.vaddr == 0 || seg.memsz == 0 || !seg.executable || seg.writable {
+            continue;
+        }
+        let start = VirtAddr::new(seg.vaddr);
+        let end = seg.vaddr + seg.memsz;
+        let first = Page::<Size4KiB>::containing_address(start).start_address();
+        let pages = ((end.saturating_sub(first.as_u64())).div_ceil(4096)) as u64;
+        let flags = {
             let mut f = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
             if seg.writable {
                 f |= PageTableFlags::WRITABLE;
@@ -186,7 +210,7 @@ fn install_segment(seg: &Seg, elf: &[u8]) -> Result<(), ()> {
             f
         };
         for i in 0..pages {
-            memory::paging::update_flags(first + i * 4096, final_flags).map_err(|_| ())?;
+            memory::paging::update_flags(first + i * 4096, flags).map_err(|_| ())?;
         }
     }
     Ok(())
@@ -209,22 +233,85 @@ fn map_user_stack() -> Result<(), ()> {
     Ok(())
 }
 
-// Map the (single, interior-mutable) user frame window so frame
-/// capabilities can hand out writable user memory. Mapped exactly once.
-fn map_frame_window() -> Result<(), ()> {
-    if memory::paging::is_mapped(VirtAddr::new(USER_FRAME_WINDOW)) {
-        return Ok(());
+/// Apply `.rela.dyn` relocations of a baked user ELF.
+///
+/// Each `R_X86_64_RELATIVE` entry (type 8) writes its *addend* into the slot
+/// at `r_offset` — for a static no-pie binary the addend already holds the
+/// final linked address (load bias is 0). Only slots inside an installed
+/// segment are patched; anything else is skipped defensively. Runs while
+/// every mapped segment is still writable (see [`load_user_program`]).
+fn apply_relocations(elf: &[u8], segs: &[Seg]) {
+    if elf.len() < 64 {
+        return;
     }
-    let pages = (USER_WINDOW_END - USER_FRAME_WINDOW) / 4096;
-    let flags = PageTableFlags::PRESENT
-        | PageTableFlags::WRITABLE
-        | PageTableFlags::USER_ACCESSIBLE;
-    for i in 0..pages {
-        let phys = memory::frames::alloc().ok_or(())?;
-        memory::paging::map_page(phys, VirtAddr::new(USER_FRAME_WINDOW + i * 4096), flags)
-            .map_err(|_| ())?;
+    let shoff = {
+        let a: [u8; 8] = elf[40..48].try_into().unwrap_or([0; 8]);
+        u64::from_ne_bytes(a)
+    } as usize;
+    let shentsize = {
+        let a: [u8; 2] = elf[58..60].try_into().unwrap_or([0; 2]);
+        u16::from_ne_bytes(a)
+    } as usize;
+    let shnum = {
+        let a: [u8; 2] = elf[60..62].try_into().unwrap_or([0; 2]);
+        u16::from_ne_bytes(a)
+    } as usize;
+    if shoff == 0 || shentsize == 0 {
+        return;
     }
-    Ok(())
+    for i in 0..shnum {
+        let off = shoff + i * shentsize;
+        if off + 64 > elf.len() {
+            break;
+        }
+        let ty = {
+            let a: [u8; 4] = elf[off + 4..off + 8].try_into().unwrap_or([0; 4]);
+            u32::from_ne_bytes(a)
+        };
+        if ty != 4 {
+            continue; // SHT_RELA (sh_type at shdr+4; sh_name at shdr+0)
+        }
+        let sh_offset = {
+            let a: [u8; 8] = elf[off + 24..off + 32].try_into().unwrap_or([0; 8]);
+            u64::from_ne_bytes(a)
+        } as usize;
+        let sh_size = {
+            let a: [u8; 8] = elf[off + 32..off + 40].try_into().unwrap_or([0; 8]);
+            u64::from_ne_bytes(a)
+        } as usize;
+        let end = sh_offset.saturating_add(sh_size).min(elf.len());
+        let mut pos = sh_offset;
+        while pos + 24 <= end {
+            let r_offset = {
+                let a: [u8; 8] = elf[pos..pos + 8].try_into().unwrap_or([0; 8]);
+                u64::from_ne_bytes(a)
+            };
+            let r_info = {
+                let a: [u8; 8] = elf[pos + 8..pos + 16].try_into().unwrap_or([0; 8]);
+                u64::from_ne_bytes(a)
+            };
+            let r_addend = {
+                let a: [u8; 8] = elf[pos + 16..pos + 24].try_into().unwrap_or([0; 8]);
+                u64::from_ne_bytes(a)
+            };
+            pos += 24;
+            let rty = (r_info & 0xffff_ffff) as u32;
+            if rty != 8 {
+                continue; // R_X86_64_RELATIVE only
+            }
+            let in_seg = segs.iter().any(|s| {
+                r_offset >= s.vaddr && r_offset + 8 <= s.vaddr + s.memsz
+            });
+            if !in_seg {
+                continue;
+            }
+            // # Safety: r_offset validated to lie inside a mapped writable
+            // user segment (installed just before this runs).
+            unsafe {
+                core::ptr::write_volatile(r_offset as *mut u64, r_addend);
+            }
+        }
+    }
 }
 
 /// Load a baked program. Returns (canonical name, entry, user stack top).
@@ -235,13 +322,15 @@ pub fn load_user_program(name: &str) -> Result<(&'static str, u64, u64), ()> {
     if segs.is_empty() {
         return Err(());
     }
+    // Phase 1: map every segment writable and copy the image (+zero bss).
     for seg in &segs {
-        install_segment(seg, bytes)?;
+        map_segment(seg, bytes)?;
     }
+    // Phase 2: patch R_X86_64_RELATIVE slots (pages still writable).
+    apply_relocations(bytes, &segs);
+    // Phase 3: drop WRITABLE from pure text segments.
+    tighten_segments(&segs)?;
     map_user_stack()?;
-    // The zero-copy frame window is shared address space: map it once for
-    // every user task (cheap —pages are demand-like mapped in advance).
-    map_frame_window()?;
     Ok((canonical, entry, USER_STACK_TOP))
 }
 

@@ -178,13 +178,17 @@ fn cmd_ipcdemo() {
 }
 
 /// Spawn a user task that additionally receives the channel capability.
+/// The 1-based capability slot is passed to the user `_start` in `rdi`.
 fn spawn_user_with_cap(
     name: &'static str,
     cap: kairos_core::caps::Capability,
-    arg: usize,
+    _arg: usize,
 ) -> Option<task::TaskId> {
-    let id = task::spawn_user_arg(name, 4, 1, arg).ok()?;
-    let _ = task::with_cspace(id, |c| c.insert(cap));
+    let id = task::spawn_user_arg(name, 4, 1, 1).ok()?;
+    let slot = task::with_cspace(id, |c| c.insert(cap))?.ok()?;
+    // Hand the *actual* 1-based slot to the program; a fresh cspace yields 0,
+    // but never assume it.
+    task::set_user_arg(id, slot as u64 + 1);
     Some(id)
 }
 

@@ -20,10 +20,18 @@ pub fn init() {
 }
 
 /// Write a raw byte; no-op until [`init`] ran.
+///
+/// The lock is taken with interrupts disabled: a preemptive switch inside
+/// the critical section would let a higher-priority task spin on the same
+/// lock forever (the lock holder cannot run until it is rescheduled).
+/// Callers may already run with IF=0 (syscall path); `without_interrupts`
+/// simply re-enters that state.
 pub fn put_byte(b: u8) {
-    if let Some(port) = SERIAL.lock().as_mut() {
-        port.send(b);
-    }
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        if let Some(port) = SERIAL.lock().as_mut() {
+            port.send(b);
+        }
+    });
 }
 
 /// Write a byte to the debug-exit "probe" port used by tests? Not needed.

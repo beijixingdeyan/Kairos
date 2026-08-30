@@ -9,7 +9,7 @@ use kairos::Message;
 /// (slot = arg, 1-based).
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(arg: usize) -> ! {
-    let slot = (arg as u16).wrapping_sub(1);
+    let slot = arg as u16;
     kairos::println("echo_server: ready");
     let mut msg = Message::data(0, [0u64; kairos::MSG_WORDS]);
     loop {

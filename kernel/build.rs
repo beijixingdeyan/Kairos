@@ -16,24 +16,31 @@ fn main() {
 
     // Build all user binaries. They are separate workspace members, so this
     // nested invocation reuses the workspace lock and cache. Each program is
-    // linked at its own virtual base (16 MiB apart) so *all* baked programs
-    // can coexist in the single shared user address space; the kernel loader
-    // maps them on demand (see kernel/src/user.rs). No spaces allowed in
-    // RUSTFLAGS (cargo splits on whitespace), hence `-Clink-arg=-Ttext=...`.
+    // linked at its own virtual base, 16 MiB apart, inside the kernel-declared
+    // user region (kernel/src/user.rs: USER_BASE = 0x10_0000_0000), so all
+    // baked programs coexist in the single shared user address space; the
+    // kernel loader maps them on demand. No spaces allowed in RUSTFLAGS
+    // (cargo splits on whitespace), hence `-Clink-arg=-Ttext=...`.
     let user_target = std::path::Path::new("..")
         .join("target")
         .join("x86_64-unknown-none")
         .join("release");
     let bases = [
-        ("hello", "0x100000000"),
-        ("echo_server", "0x101000000"),
-        ("echo_client", "0x102000000"),
-        ("counter", "0x103000000"),
-        ("deadline", "0x104000000"),
+        ("hello", "0x1000000000"),
+        ("echo_server", "0x1001000000"),
+        ("echo_client", "0x1002000000"),
+        ("counter", "0x1003000000"),
+        ("deadline", "0x1004000000"),
     ];
     for (bin, base) in bases {
+        let encoded = format!("-Clink-arg=-Ttext={base}\n");
         let status = Command::new("cargo")
+            // Modern cargo consults `CARGO_ENCODED_RUSTFLAGS` (newline-
+            // separated flags) and ignores plain RUSTFLAGS when it is set;
+            // the parent cargo may export either, so set both forms to the
+            // same value to guarantee the link base reaches the linker.
             .env("RUSTFLAGS", format!("-Clink-arg=-Ttext={base}"))
+            .env("CARGO_ENCODED_RUSTFLAGS", &encoded)
             .args([
                 "build",
                 "--manifest-path",

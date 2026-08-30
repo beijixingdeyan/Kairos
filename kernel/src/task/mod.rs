@@ -244,6 +244,22 @@ pub fn e_kstack_top(id: TaskId) -> u64 {
         .map_or(0, |t| t.kstack_top as u64)
 }
 
+/// Overwrite the initial `rdi` of a task that has not run yet (used to hand
+/// a capability slot to a freshly spawned user program). No-op if the task
+/// already ran — spawn-time caller, so that cannot happen in practice.
+pub fn set_user_arg(id: TaskId, arg: u64) {
+    let mut guard = TASKS.lock();
+    if let Some(e) = guard.iter_mut().find(|t| t.id == id) {
+        // # Safety: single CPU; the task has not been dispatched yet, so its
+        // save area is only touched here.
+        unsafe {
+            if !e.save_area.is_null() {
+                (*e.save_area).rdi = arg;
+            }
+        }
+    }
+}
+
 pub fn is_user_task(id: TaskId) -> bool {
     TASKS.lock()
         .iter()
@@ -532,29 +548,53 @@ pub fn bootstrap_first_task() -> ! {
 
 pub fn dump_tasks() {
     serial::write_line("  ID  NAME                  MODE   PRI  WGT  RUNS  PRE  MISS  TICKS");
-    let guard = SCHED.lock();
-    if let Some(s) = guard.as_ref() {
-        for t in s.iter() {
-            let mode = if TASKS.lock().iter().any(|e| e.id == t.id && e.is_user) {
-                "user"
-            } else {
-                "kern"
-            };
-            serial::write_line(&format!(
-                "  {:>3}  {:<20}  {:<4}  {:>3}  {:>3}  {:>5} {:>4}  {:>4}  {:>5}",
-                t.id,
-                name_of(t.id),
-                mode,
-                t.priority,
-                t.weight,
-                t.stats.runs,
-                t.stats.preemptions,
-                t.stats.deadline_misses,
-                t.stats.total_ticks
-            ));
-        }
+    // Snapshot the scheduler's table under the canonical interrupt-safe
+    // accessor: locking SCHED directly would let a timer IRQ spin forever on
+    // the same lock (the ISR also takes SCHED), freezing the shell.
+    let rows: alloc::vec::Vec<(TaskId, u8, u32, u64, u64, u64, u64)> = {
+        let mut rows = alloc::vec::Vec::new();
+        x86_64::instructions::interrupts::without_interrupts(|| {
+            let guard = SCHED.lock();
+            if let Some(s) = guard.as_ref() {
+                for t in s.iter() {
+                    // Exited tasks are moved to the graveyard at exit; do not
+                    // show them in the live table.
+                    if t.state == kairos_core::sched::TaskState::Finished {
+                        continue;
+                    }
+                    rows.push((
+                        t.id,
+                        t.priority,
+                        t.weight,
+                        t.stats.runs,
+                        t.stats.preemptions,
+                        t.stats.deadline_misses,
+                        t.stats.total_ticks,
+                    ));
+                }
+            }
+        });
+        rows
+    };
+    for (id, pri, wgt, runs, pre, miss, ticks) in rows {
+        let mode = if TASKS.lock().iter().any(|e| e.id == id && e.is_user) {
+            "user"
+        } else {
+            "kern"
+        };
+        serial::write_line(&format!(
+            "  {:>3}  {:<20}  {:<4}  {:>3}  {:>3}  {:>5} {:>4}  {:>4}  {:>5}",
+            id,
+            name_of(id),
+            mode,
+            pri,
+            wgt,
+            runs,
+            pre,
+            miss,
+            ticks
+        ));
     }
-    drop(guard);
 }
 
 /// Kernel self-test for the task layer (runs in VM test mode).

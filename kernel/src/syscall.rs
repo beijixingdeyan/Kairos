@@ -69,10 +69,29 @@ unsafe fn wrmsr(msr: u32, value: u64) {
     }
 }
 
+unsafe fn rdmsr(msr: u32) -> u64 {
+    // # Safety: caller guarantees the MSR is safe to read.
+    unsafe {
+        let (hi, lo): (u32, u32);
+        core::arch::asm!(
+            "rdmsr",
+            in("ecx") msr,
+            out("eax") lo,
+            out("edx") hi,
+            options(nomem, nostack, preserves_flags),
+        );
+        ((hi as u64) << 32) | lo as u64
+    }
+}
+
 /// Set up the syscall MSRs. Call once, before any task runs.
 pub fn init() {
     let entry = kairos_syscall_entry as *const () as u64;
     unsafe {
+        // EFER.SCE: the `syscall` instruction is #UD while disabled; the
+        // bootloader leaves it off. Preserve the existing bits (LME/LMA/NXE).
+        let efer: u64 = rdmsr(0xC000_0080);
+        wrmsr(0xC000_0080, efer | 1);
         // LSTAR: syscall entry.
         wrmsr(0xC000_0082, entry);
         // STAR: kernel CS = 0x08 (bits 47:32). Bits 63:48 unused (we return

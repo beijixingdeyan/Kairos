@@ -5,10 +5,11 @@
 use kairos;
 use kairos::Message;
 
-/// # Safety: raw entry point; the kernel passes the channel slot in `rdi`.
+/// # Safety: raw entry point; the kernel passes the channel slot in `rdi`
+/// (1-based capability slot).
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(arg: usize) -> ! {
-    let slot = (arg as u16).wrapping_sub(1);
+    let slot = arg as u16;
     kairos::println("echo_client: starting");
     let mut n: u64 = 0;
     loop {
