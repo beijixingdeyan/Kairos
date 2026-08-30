@@ -74,5 +74,5 @@ jobs:
         run: |
           timeout 15 bash -c 'KAIROS_QEMU=qemu-system-x86_64 cargo run -p os - < /dev/null \
             | tee /tmp/kairos-boot.log' || true
-          grep -q "kairos> " /tmp/kairos-boot.log || \
-            { echo "shell prompt not seen"; exit 1; }
+          grep -Eq "kairos shell .*type \`help\`" /tmp/kairos-boot.log || \
+            { echo "shell banner not seen"; exit 1; }
