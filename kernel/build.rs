@@ -19,8 +19,8 @@ fn main() {
     // linked at its own virtual base, 16 MiB apart, inside the kernel-declared
     // user region (kernel/src/user.rs: USER_BASE = 0x10_0000_0000), so all
     // baked programs coexist in the single shared user address space; the
-    // kernel loader maps them on demand. No spaces allowed in RUSTFLAGS
-    // (cargo splits on whitespace), hence `-Clink-arg=-Ttext=...`.
+    // kernel loader maps them on demand. No spaces allowed in the flag
+    // (RUSTFLAGS is split on whitespace).
     let user_target = std::path::Path::new("..")
         .join("target")
         .join("x86_64-unknown-none")
@@ -33,19 +33,20 @@ fn main() {
         ("deadline", "0x1004000000"),
     ];
     for (bin, base) in bases {
-        // `--section-start=.text=` (long form) instead of `-Ttext=`: recent
-        // LLVM lld dropped the `-Ttext` short alias, and CI rebuilds from a
-        // cold cache exercise the linker where incremental local builds may
-        // not. The long option is accepted by every lld release.
+        // Link base via a linker section option. The long form
+        // `--section-start=.text=` is accepted by every lld release.
+        //
+        // Transport: plain RUSTFLAGS only. Modern cargo splits RUSTFLAGS on
+        // whitespace (stable behaviour), whereas CARGO_ENCODED_RUSTFLAGS
+        // uses a separator that has changed across cargo versions (`\n` vs
+        // `\x1f`); passing the "encoded" form verbatim leaked a trailing
+        // newline into the linker argument on CI and failed every link.
+        // env_remove guarantees the child cargo never picks an inherited
+        // encoded variable from the parent build. No spaces in the arg.
         let arg = format!("--section-start=.text={base}");
-        let encoded = format!("-Clink-arg={arg}\n");
         let status = Command::new("cargo")
-            // Modern cargo consults `CARGO_ENCODED_RUSTFLAGS` (newline-
-            // separated flags) and ignores plain RUSTFLAGS when it is set;
-            // the parent cargo may export either, so set both forms to the
-            // same value to guarantee the link base reaches the linker.
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
             .env("RUSTFLAGS", format!("-Clink-arg={arg}"))
-            .env("CARGO_ENCODED_RUSTFLAGS", &encoded)
             .args([
                 "build",
                 "--manifest-path",
