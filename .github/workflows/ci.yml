@@ -164,11 +164,11 @@ jobs:
           did not finish; last guest output above"; exit 1; }
           exit $code
 
-      - name: Boot without self-tests (shell milestone, 90 s watchdog)
+      - name: Boot without self-tests (shell milestone, KVM, 90 s watchdog)
         if: always()
         run: |
           set +e
-          timeout 120 bash -c 'KAIROS_QEMU=/opt/kairos-qemu/bin/qemu-system-x86_64 \\
+          timeout 90 bash -c 'KAIROS_QEMU=/opt/kairos-qemu/bin/qemu-system-x86_64 \
             cargo run -p os -- -accel kvm -cpu max -d int -D /tmp/kairos-int.log < /dev/null \
             | tee /tmp/kairos-boot.log' || true
           echo "--- guest output (tail) ---"
