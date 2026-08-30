@@ -193,3 +193,13 @@ KVM（Linux 宿主 `-accel kvm` 下 PIT 精确 1 kHz）。
   任务切换），实测吞吐量不受墙钟影响；
 - 墙钟交互延迟受宿主模拟器限制（Windows 15.6 ms 量子），非内核问题；
   在 Linux/KVM 或支持 1 ms 精度的宿主上即为 ~1 ms。
+
+**非抢占忙区（kernel busy region）**：秒表/慢时钟下，内核的整套自检
+（`test_runner`）会持续占满调度器——若定时器中断趁隙把外壳/用户任务
+调度进来，会与测试的锁持有关窗口竞争，出现偶发卡死。为此上述忙操作
+（`run_cmd`、`spawn_kernel`、`spawn_user_full`、`test_runner`）进入
+`KERNEL_BUSY` 门禁（`kernel/src/task/mod.rs` 的 `KernelBusyGuard` 与
+`kernel_busy_enter()`，RAII）：忙区内中断处理跳过调度决策（仅保留返回
+帧的必须路径），忙区结束立即恢复正常调度。这使“内核发起的长任务”具有
+**不可抢占的执行窗口**——是确定性调度纪律的一部分，不是锁风暴的补丁：
+任务间抢占路径不变，只约束“内核自己占用 CPU 的长临界区”。
