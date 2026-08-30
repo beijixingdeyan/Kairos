@@ -115,6 +115,10 @@ jobs:
           path: /opt/kairos-qemu
           key: kairos-qemu-9.2.0
 
+      - name: Open /dev/kvm for the KVM leg of the experiment
+        if: always()
+        run: sudo chmod 666 /dev/kvm || true
+
       - name: Build QEMU 9.2 from source (cached)
         # apt's qemu 8.2 + SeaBIOS never finishes POST on this image (the
         # guest hangs in SMM with an endless vector-0x08 timer flood under
@@ -144,7 +148,7 @@ jobs:
         run: |
           set +e
           KAIROS_TEST=1 KAIROS_QEMU=/opt/kairos-qemu/bin/qemu-system-x86_64 \
-            timeout 300 cargo run -p os -- -d int -D /tmp/kairos-int-test.log
+            timeout 300 cargo run -p os -- -icount shift=0 -d int -D /tmp/kairos-int-test.log
           code=$?
           echo "runner exit: $code"
           echo "--- int log structure ---"
@@ -164,8 +168,8 @@ jobs:
         if: always()
         run: |
           set +e
-          timeout 90 bash -c 'KAIROS_QEMU=/opt/kairos-qemu/bin/qemu-system-x86_64 \
-            cargo run -p os -- -d int -D /tmp/kairos-int.log < /dev/null \
+          timeout 120 bash -c 'KAIROS_QEMU=/opt/kairos-qemu/bin/qemu-system-x86_64 \\
+            cargo run -p os -- -accel kvm -cpu max -d int -D /tmp/kairos-int.log < /dev/null \
             | tee /tmp/kairos-boot.log' || true
           echo "--- guest output (tail) ---"
           tail -c 3000 /tmp/kairos-boot.log
