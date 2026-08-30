@@ -33,13 +33,18 @@ fn main() {
         ("deadline", "0x1004000000"),
     ];
     for (bin, base) in bases {
-        let encoded = format!("-Clink-arg=-Ttext={base}\n");
+        // `--section-start=.text=` (long form) instead of `-Ttext=`: recent
+        // LLVM lld dropped the `-Ttext` short alias, and CI rebuilds from a
+        // cold cache exercise the linker where incremental local builds may
+        // not. The long option is accepted by every lld release.
+        let arg = format!("--section-start=.text={base}");
+        let encoded = format!("-Clink-arg={arg}\n");
         let status = Command::new("cargo")
             // Modern cargo consults `CARGO_ENCODED_RUSTFLAGS` (newline-
             // separated flags) and ignores plain RUSTFLAGS when it is set;
             // the parent cargo may export either, so set both forms to the
             // same value to guarantee the link base reaches the linker.
-            .env("RUSTFLAGS", format!("-Clink-arg=-Ttext={base}"))
+            .env("RUSTFLAGS", format!("-Clink-arg={arg}"))
             .env("CARGO_ENCODED_RUSTFLAGS", &encoded)
             .args([
                 "build",

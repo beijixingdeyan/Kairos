@@ -73,7 +73,11 @@ jobs:
       - name: Gate coverage at 70%
         run: |
           THRESHOLD=70
-          COV=$(cargo llvm-cov report --summary-only | grep -E '^TOTAL' | awk '{gsub("%","",$NF); print $NF}')
+          # Line coverage from the lcov artifact (LF = lines found,
+          # LH = lines hit). Independent of the report table layout, which
+          # varies across cargo-llvm-cov releases.
+          COV=$(awk -F: '/^LF:/{lf+=$2} /^LH:/{lh+=$2} \
+            END {printf "%.1f", (lf>0 ? 100*lh/lf : 0)}' coverage.lcov)
           echo "core line coverage: ${COV}%"
           awk "BEGIN{exit !($COV >= $THRESHOLD)}" \
             || { echo "coverage ${COV}% below gate ${THRESHOLD}%"; exit 1; }
