@@ -131,12 +131,19 @@ fn main() {
     let console: Box<dyn Console> = match console_port {
         Some(port) => {
             let mut conn = None;
-            for _ in 0..200 {
-                if let Ok(s) = std::net::TcpStream::connect(("127.0.0.1", port)) {
-                    conn = Some(s);
-                    break;
+            let mut last_err = String::from("never attempted");
+            for attempt in 0..200 {
+                match std::net::TcpStream::connect(("127.0.0.1", port)) {
+                    Ok(s) => {
+                        conn = Some(s);
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = e.to_string();
+                        eprintln!("[runner] serial connect attempt {attempt}: {e}");
+                        std::thread::sleep(std::time::Duration::from_millis(25));
+                    }
                 }
-                std::thread::sleep(std::time::Duration::from_millis(25));
             }
             match conn {
                 Some(s) => {
@@ -149,7 +156,9 @@ fn main() {
                     Box::new(SocketConsole(s))
                 }
                 None => {
-                    eprintln!("error: could not connect to QEMU serial console");
+                    eprintln!(
+                        "error: could not connect to QEMU serial console (last: {last_err})"
+                    );
                     let _ = child.kill();
                     let _ = child.wait();
                     std::process::exit(2);
