@@ -116,7 +116,17 @@ jobs:
         run: cargo build -p os
 
       - name: Boot under QEMU with in-guest self-tests
-        run: KAIROS_TEST=1 KAIROS_QEMU=qemu-system-x86_64 cargo run -p os
+        # `timeout` turns a hang into a visible failure and prints the last
+        # guest output (a wedged boot shows exactly where it stopped).
+        run: |
+          set +e
+          KAIROS_TEST=1 KAIROS_QEMU=qemu-system-x86_64 timeout 300 \
+            cargo run -p os
+          code=$?
+          echo "runner exit: $code"
+          [ $code -ne 124 ] && exit $code
+          echo "TIMED OUT: the in-guest self-tests did not finish; \
+          last guest output above"
 
       - name: Boot without self-tests (shell milestone, 15 s watchdog)
         run: |
